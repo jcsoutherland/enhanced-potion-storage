@@ -22,11 +22,11 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
-import com.potionstorage.BankArrangement.Entry;
-import com.potionstorage.BankArrangement.Pos;
-import com.potionstorage.PotionStore.Stack;
+import com.enhancedpotionstorage.BankArrangement.Entry;
+import com.enhancedpotionstorage.BankArrangement.Pos;
+import com.enhancedpotionstorage.PotionStore.Stack;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;

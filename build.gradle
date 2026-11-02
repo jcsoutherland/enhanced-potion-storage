@@ -14,20 +14,20 @@ repositories {
 }
 
 def runeLiteVersion = 'latest.release'
-def pluginMainClass = 'com.potionstorage.PotionStoragePluginTest'
+def pluginMainClass = 'com.enhancedpotionstorage.EnhancedPotionStoragePluginTest'
 
 dependencies {
 	compileOnly "net.runelite:client:$runeLiteVersion"
 
-	compileOnly 'org.projectlombok:lombok:1.18.30'
-	annotationProcessor 'org.projectlombok:lombok:1.18.30'
+	compileOnly 'org.projectlombok:lombok:1.18.42'
+	annotationProcessor 'org.projectlombok:lombok:1.18.42'
 
 	testImplementation 'junit:junit:4.12'
 	testImplementation "net.runelite:client:$runeLiteVersion"
 	testImplementation "net.runelite:jshell:$runeLiteVersion"
 }
 
-group = 'com.potionstorage'
+group = 'com.enhancedpotionstorage'
 version = '1.0.0'
 
 tasks.withType(JavaCompile).configureEach {

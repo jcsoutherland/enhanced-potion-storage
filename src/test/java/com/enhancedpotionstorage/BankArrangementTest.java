@@ -1,8 +1,8 @@
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
-import com.potionstorage.BankArrangement.Drop;
-import com.potionstorage.BankArrangement.Entry;
-import com.potionstorage.BankArrangement.Pos;
+import com.enhancedpotionstorage.BankArrangement.Drop;
+import com.enhancedpotionstorage.BankArrangement.Entry;
+import com.enhancedpotionstorage.BankArrangement.Pos;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;

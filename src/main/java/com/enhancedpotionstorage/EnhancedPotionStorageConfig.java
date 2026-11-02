@@ -22,17 +22,17 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
 import net.runelite.client.config.ConfigSection;
 
-@ConfigGroup(PotionStorageConfig.GROUP)
-public interface PotionStorageConfig extends Config
+@ConfigGroup(EnhancedPotionStorageConfig.GROUP)
+public interface EnhancedPotionStorageConfig extends Config
 {
-	String GROUP = "potionstorage";
+	String GROUP = "enhancedpotionstorage";
 
 	@ConfigSection(
 		name = "Bank view",

@@ -22,9 +22,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
-import static com.potionstorage.BankWidgets.isWidgetOp;
+import static com.enhancedpotionstorage.BankWidgets.isWidgetOp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -76,7 +76,7 @@ final class StorePanel
 	private static final int DRAG_DEAD_ZONE = 5;
 
 	private final Client client;
-	private final PotionStorageConfig config;
+	private final EnhancedPotionStorageConfig config;
 	private final PluginManager pluginManager;
 	private final BankTagsBridge bankTags;
 	private final Runnable relayout;
@@ -87,7 +87,7 @@ final class StorePanel
 	/** The panel took a copy's slot for the server's: no copies this bank session. */
 	private boolean refused;
 
-	StorePanel(Client client, PotionStorageConfig config, PluginManager pluginManager, BankTagsBridge bankTags,
+	StorePanel(Client client, EnhancedPotionStorageConfig config, PluginManager pluginManager, BankTagsBridge bankTags,
 		Runnable relayout)
 	{
 		this.client = client;

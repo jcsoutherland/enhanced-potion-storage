@@ -22,9 +22,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
-import com.potionstorage.PotionVisibility.Where;
+import com.enhancedpotionstorage.PotionVisibility.Where;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
@@ -218,7 +218,7 @@ final class VisibilityPanel extends PluginPanel
 		JPanel header = new JPanel(new BorderLayout());
 		header.setBackground(ColorScheme.DARK_GRAY_COLOR);
 		header.setBorder(new EmptyBorder(0, 0, 2, 0));
-		JLabel title = new JLabel("Potion Storage");
+		JLabel title = new JLabel("Enhanced Potion Storage");
 		title.setFont(FontManager.getRunescapeBoldFont());
 		title.setForeground(Color.WHITE);
 		header.add(title, BorderLayout.WEST);

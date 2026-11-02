@@ -22,9 +22,9 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
-import com.potionstorage.PotionVisibility.Where;
+import com.enhancedpotionstorage.PotionVisibility.Where;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;

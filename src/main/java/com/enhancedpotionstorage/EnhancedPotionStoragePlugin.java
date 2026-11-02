@@ -22,14 +22,14 @@
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
-package com.potionstorage;
+package com.enhancedpotionstorage;
 
 import com.google.inject.Provides;
-import com.potionstorage.PotionStore.Stack;
-import com.potionstorage.PotionVisibility.Where;
-import static com.potionstorage.BankWidgets.BANKTAB_POTIONSTORE;
-import static com.potionstorage.BankWidgets.LAST_WITHDRAW_OP;
-import static com.potionstorage.BankWidgets.isWidgetOp;
+import com.enhancedpotionstorage.PotionStore.Stack;
+import com.enhancedpotionstorage.PotionVisibility.Where;
+import static com.enhancedpotionstorage.BankWidgets.BANKTAB_POTIONSTORE;
+import static com.enhancedpotionstorage.BankWidgets.LAST_WITHDRAW_OP;
+import static com.enhancedpotionstorage.BankWidgets.isWidgetOp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -83,6 +83,7 @@ import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.chatbox.ChatboxPanelManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
+import net.runelite.client.plugins.PluginInstantiationException;
 import net.runelite.client.plugins.PluginManager;
 import net.runelite.client.plugins.bank.BankSearch;
 import net.runelite.client.plugins.banktags.BankTag;
@@ -125,11 +126,11 @@ import net.runelite.client.util.Text;
  */
 @Slf4j
 @PluginDescriptor(
-	name = "Potion Storage",
+	name = "Enhanced Potion Storage",
 	description = "Shows potion storage in the bank as normal items: in every tab, in searches and tag tabs, movable and withdrawable, without using bank space",
 	tags = {"bank", "potion", "pots", "storage", "tags", "layout"}
 )
-public class PotionStoragePlugin extends Plugin
+public class EnhancedPotionStoragePlugin extends Plugin
 {
 	private static final String SEARCH_TITLE = "Showing items:";
 	/** The Bank Tags plugin's option for taking an item out of the open tag; it may carry the tag's name after. */
@@ -154,6 +155,12 @@ public class PotionStoragePlugin extends Plugin
 	/** A full re-read of the store this often, whatever varp the store's own list does not name. */
 	private static final int STORE_REREAD_TICKS = 50;
 
+	/**
+	 * ziggle-dev's Potion Storage, which this plugin is built from: it draws onto the same spare bank slots and
+	 * points the same clicks at the store, so the two cannot run together.
+	 */
+	private static final String BASE_PLUGIN = "com.potionstorage.PotionStoragePlugin";
+
 	@Inject
 	private Client client;
 
@@ -170,7 +177,7 @@ public class PotionStoragePlugin extends Plugin
 	private BankSearch bankSearch;
 
 	@Inject
-	private PotionStorageConfig config;
+	private EnhancedPotionStorageConfig config;
 
 	@Inject
 	private EventBus eventBus;
@@ -235,14 +242,15 @@ public class PotionStoragePlugin extends Plugin
 	}
 
 	@Provides
-	PotionStorageConfig provideConfig(ConfigManager configManager)
+	EnhancedPotionStorageConfig provideConfig(ConfigManager configManager)
 	{
-		return configManager.getConfig(PotionStorageConfig.class);
+		return configManager.getConfig(EnhancedPotionStorageConfig.class);
 	}
 
 	@Override
 	protected void startUp()
 	{
+		stepAsideForBasePlugin();
 		store = new PotionStore(client);
 		savedOrder = new SavedOrder(configManager);
 		bankTags = new BankTagsBridge(pluginManager, configManager, itemManager, chatboxPanelManager, clientThread);
@@ -251,11 +259,11 @@ public class PotionStoragePlugin extends Plugin
 		panel = new StorePanel(client, config, pluginManager, bankTags, this::relayout);
 		storeButton = new StoreButton(client);
 		placeholderRelease = new PlaceholderRelease(client, savedOrder, config::placeholders, this::relayout);
-		visibility = new PotionVisibility(key -> configManager.getConfiguration(PotionStorageConfig.GROUP, key), this::saveVisibility);
+		visibility = new PotionVisibility(key -> configManager.getConfiguration(EnhancedPotionStorageConfig.GROUP, key), this::saveVisibility);
 		sidebar = new VisibilityPanel(itemManager::getImage, visibility, () -> clientThread.invokeLater(this::sendPotions),
-			doses -> configManager.setConfiguration(PotionStorageConfig.GROUP, "sidebarCount", doses ? SidebarCount.DOSES : SidebarCount.POTIONS));
+			doses -> configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, "sidebarCount", doses ? SidebarCount.DOSES : SidebarCount.POTIONS));
 		sidebarButton = NavigationButton.builder()
-			.tooltip("Potion Storage")
+			.tooltip("Enhanced Potion Storage")
 			.icon(ImageUtil.loadImageResource(getClass(), "panel_icon.png"))
 			.priority(SIDEBAR_PRIORITY)
 			.panel(sidebar)
@@ -312,7 +320,7 @@ public class PotionStoragePlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged e)
 	{
-		if (PotionStorageConfig.GROUP.equals(e.getGroup()) && !SavedOrder.isOwnKey(e.getKey()))
+		if (EnhancedPotionStorageConfig.GROUP.equals(e.getGroup()) && !SavedOrder.isOwnKey(e.getKey()))
 		{
 			visibility.reload();
 			if ("showSidebar".equals(e.getKey()))
@@ -341,16 +349,45 @@ public class PotionStoragePlugin extends Plugin
 		}
 	}
 
-	/** The Bank Tags plugin, or the Potion Storage Customizer, may have come or gone. */
+	/** The Bank Tags plugin, the Potion Storage Customizer or the base Potion Storage plugin may have come or gone. */
 	@Subscribe
 	public void onPluginChanged(PluginChanged e)
 	{
+		if (e.isLoaded() && BASE_PLUGIN.equals(e.getPlugin().getClass().getName()))
+		{
+			stepAsideForBasePlugin();
+		}
 		clientThread.invokeLater(() ->
 		{
 			bankTags.refresh();
 			panel.refresh();
 		});
 		relayout();
+	}
+
+	/**
+	 * With the base Potion Storage plugin on, turn this one off - saved as off, so it stays off until the user
+	 * turns it on again, and turns itself straight back off if the base plugin is still on then.
+	 */
+	private void stepAsideForBasePlugin()
+	{
+		if (BankTagsBridge.findActive(pluginManager, p -> BASE_PLUGIN.equals(p.getClass().getName())) == null)
+		{
+			return;
+		}
+		log.info("the Potion Storage plugin is on: turning Enhanced Potion Storage off");
+		SwingUtilities.invokeLater(() ->
+		{
+			pluginManager.setPluginEnabled(this, false);
+			try
+			{
+				pluginManager.stopPlugin(this);
+			}
+			catch (PluginInstantiationException ex)
+			{
+				log.warn("turning Enhanced Potion Storage off failed", ex);
+			}
+		});
 	}
 
 	/** Draw the bank again, at the end of this frame. */
@@ -728,7 +765,7 @@ public class PotionStoragePlugin extends Plugin
 			.type(ChatMessageType.CONSOLE)
 			.runeLiteFormattedMessage(new ChatMessageBuilder()
 				.append(ChatColorType.HIGHLIGHT)
-				.append("Potion Storage: ")
+				.append("Enhanced Potion Storage: ")
 				.append(ChatColorType.NORMAL)
 				.append(text)
 				.build())
@@ -958,11 +995,11 @@ public class PotionStoragePlugin extends Plugin
 	{
 		if (value.isEmpty())
 		{
-			configManager.unsetConfiguration(PotionStorageConfig.GROUP, key);
+			configManager.unsetConfiguration(EnhancedPotionStorageConfig.GROUP, key);
 		}
 		else
 		{
-			configManager.setConfiguration(PotionStorageConfig.GROUP, key, value);
+			configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, key, value);
 		}
 	}
 
