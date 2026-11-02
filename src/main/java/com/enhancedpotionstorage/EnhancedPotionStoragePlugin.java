@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -24,20 +25,25 @@
  */
 package com.enhancedpotionstorage;
 
+import com.google.gson.Gson;
 import com.google.inject.Provides;
 import com.enhancedpotionstorage.PotionStore.Stack;
 import com.enhancedpotionstorage.PotionVisibility.Where;
+import com.enhancedpotionstorage.TemplateStore.Removed;
 import static com.enhancedpotionstorage.BankWidgets.BANKTAB_POTIONSTORE;
 import static com.enhancedpotionstorage.BankWidgets.LAST_WITHDRAW_OP;
+import static com.enhancedpotionstorage.BankWidgets.SET_DOSE;
 import static com.enhancedpotionstorage.BankWidgets.isWidgetOp;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import javax.inject.Inject;
@@ -79,6 +85,7 @@ import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.events.PluginChanged;
+import net.runelite.client.events.RuneScapeProfileChanged;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.chatbox.ChatboxPanelManager;
 import net.runelite.client.plugins.Plugin;
@@ -91,6 +98,7 @@ import net.runelite.client.plugins.banktags.BankTagsPlugin;
 import net.runelite.client.plugins.banktags.tabs.Layout;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.util.Text;
 
@@ -194,6 +202,12 @@ public class EnhancedPotionStoragePlugin extends Plugin
 	@Inject
 	private ChatMessageManager chatMessageManager;
 
+	@Inject
+	private OverlayManager overlayManager;
+
+	@Inject
+	private Gson gson;
+
 	private PotionStore store;
 	private SavedOrder savedOrder;
 	private BankTagsBridge bankTags;
@@ -205,12 +219,19 @@ public class EnhancedPotionStoragePlugin extends Plugin
 	private PotionVisibility visibility;
 	private VisibilityPanel sidebar;
 	private NavigationButton sidebarButton;
+	private TemplateStore templates;
+	private TemplatePanel templatePanel;
+	private AccountSettings accountSettings;
+	private DoseLabelOverlay doseLabels;
+
+	/** The template version and potion count the store's plan was made from. Client thread. */
+	private int planVersion = -1;
+	private int planPotions = -1;
+	/** The missing slots last sent to the panel, for "Restore all". Client thread. */
+	private List<TemplatePanel.Missing> missing = Collections.emptyList();
 
 	/** What the last build drew. Client thread only. */
 	private Frame frame = new Frame(Frame.Mode.NONE);
-
-	/** The tab open when each potion was deposited this bank session, by key: where it goes, if new to the order. */
-	private final Map<Integer, Integer> depositedTo = new HashMap<>();
 
 	/** Warned this login that deposited potions go into the bank. */
 	private boolean depositWarned;
@@ -253,15 +274,25 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		stepAsideForBasePlugin();
 		store = new PotionStore(client);
 		savedOrder = new SavedOrder(configManager);
+		savedOrder.setRank(key -> store.plan().rank(key));
+		savedOrder.setStoredMoved(this::placementEdited);
+		templates = new TemplateStore(templateStorage(), gson, savedOrder::encodeArrangement, savedOrder::placeStoredAs,
+			store::potions);
+		accountSettings = new AccountSettings(configManager);
+		planVersion = -1;
 		bankTags = new BankTagsBridge(pluginManager, configManager, itemManager, chatboxPanelManager, clientThread);
-		view = new BankView(client, config, savedOrder, this::depositedTo);
+		view = new BankView(client, config, savedOrder, this::newSection);
 		drags = new BankDrags(client, savedOrder, this::relayout);
 		panel = new StorePanel(client, config, pluginManager, bankTags, this::relayout);
 		storeButton = new StoreButton(client);
 		placeholderRelease = new PlaceholderRelease(client, savedOrder, config::placeholders, this::relayout);
-		visibility = new PotionVisibility(key -> configManager.getConfiguration(EnhancedPotionStorageConfig.GROUP, key), this::saveVisibility);
+		visibility = new PotionVisibility(this::readHidden, this::writeHidden);
+		templatePanel = new TemplatePanel(new PanelActions());
 		sidebar = new VisibilityPanel(itemManager::getImage, visibility, () -> clientThread.invokeLater(this::sendPotions),
-			doses -> configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, "sidebarCount", doses ? SidebarCount.DOSES : SidebarCount.POTIONS));
+			doses -> configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, "sidebarCount", doses ? SidebarCount.DOSES : SidebarCount.POTIONS),
+			templatePanel);
+		doseLabels = new DoseLabelOverlay(() -> frame);
+		overlayManager.add(doseLabels);
 		sidebarButton = NavigationButton.builder()
 			.tooltip("Enhanced Potion Storage")
 			.icon(ImageUtil.loadImageResource(getClass(), "panel_icon.png"))
@@ -277,6 +308,8 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		relayout();
 		clientThread.invokeLater(() ->
 		{
+			accountSettings.accountChanged();
+			refreshPlan();
 			panel.refresh();
 			// Started with the bank open: count it now, so the first deposit is compared with something.
 			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
@@ -292,6 +325,7 @@ public class EnhancedPotionStoragePlugin extends Plugin
 	protected void shutDown()
 	{
 		clientToolbar.removeNavigation(sidebarButton);
+		overlayManager.remove(doseLabels);
 		eventBus.unregister(beforeBankTags);
 		clientThread.invokeLater(() ->
 		{
@@ -314,13 +348,27 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		bankSignature = 0;
 		learnedSignature = 0;
 		bankPotions = null;
-		depositedTo.clear();
 	}
 
 	@Subscribe
 	public void onConfigChanged(ConfigChanged e)
 	{
-		if (EnhancedPotionStorageConfig.GROUP.equals(e.getGroup()) && !SavedOrder.isOwnKey(e.getKey()))
+		// The plugin's per-account records - the saved order, templates, settings' copies - are not settings.
+		if (!EnhancedPotionStorageConfig.GROUP.equals(e.getGroup()) || e.getProfile() != null)
+		{
+			return;
+		}
+		boolean fromAccount = accountSettings.restoring();
+		accountSettings.changed(e.getKey(), e.getNewValue());
+		if (!fromAccount && (EnhancedPotionStorageConfig.PLACE_KEY.equals(e.getKey())
+			|| EnhancedPotionStorageConfig.TAG_KEY.equals(e.getKey())))
+		{
+			String oldTag = EnhancedPotionStorageConfig.TAG_KEY.equals(e.getKey()) ? e.getOldValue() : config.bankPlaceTag();
+			boolean wasTag = EnhancedPotionStorageConfig.PLACE_KEY.equals(e.getKey())
+				? BankPlace.TAG.name().equals(e.getOldValue()) : config.bankPlace() == BankPlace.TAG;
+			clientThread.invokeLater(() -> applyBankPlace(wasTag ? oldTag : null));
+		}
+		if (!SavedOrder.isOwnKey(e.getKey()))
 		{
 			visibility.reload();
 			if ("showSidebar".equals(e.getKey()))
@@ -487,6 +535,7 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		{
 			tidyLayout(items, bank);
 		}
+		refreshPlan();
 		List<Stack> stacks = new ArrayList<>(store.stacks());
 		stacks.addAll(placeholders(stacks));
 		List<Stack> shownStacks = storeShownIn(shown, stacks);
@@ -560,7 +609,8 @@ public class EnhancedPotionStoragePlugin extends Plugin
 				on = config.inSearch();
 				break;
 			case BANK:
-				on = config.inBank();
+				// Sent to a bank tag, the slots are that tag's: the tag tab shows them, the bank does not.
+				on = config.inBank() && config.bankPlace() != BankPlace.TAG;
 				break;
 			default:
 				on = false;
@@ -609,7 +659,11 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		// A potion the bank holds too is the bank's to place, and BankView.combine shows the store's count on it.
 		ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 		Set<Integer> inBank = config.combineWithBank() && bank != null ? view.itemsHeld(bank) : Collections.emptySet();
+		// The Bank Tags plugin draws a stored potion in a layout as the store's withdraw dose, whichever dose its
+		// cell holds: one cell per potion, as the active slot.
+		Set<Integer> kinds = new HashSet<>();
 		bankTags.addToOpenLayout(store.stacks().stream()
+			.filter(s -> s.active && kinds.add(s.kind.index))
 			.filter(s -> !inBank.contains(s.itemId) && (config.showUnfinished() || !s.kind.unfinished)
 				&& visibility.shown(Where.TAGS, s.kind.id()))
 			.filter(s -> s.ids.stream().noneMatch(placed::contains) && s.ids.stream().anyMatch(tag::contains))
@@ -620,13 +674,14 @@ public class EnhancedPotionStoragePlugin extends Plugin
 	// ---- the store ----
 
 	/**
-	 * Read the store if it changed, and keep a placeholder for each potion that ran out - while the bank keeps
-	 * them for its own items. One that leaves none loses its place, as a bank item does: deposited again, it
-	 * goes where a deposit goes. A potion back in stock is drawn as itself again, where its placeholder was. Not
+	 * Read the store if it changed, and keep a placeholder for each dose slot that ran out - while the bank keeps
+	 * them for its own items. One that leaves none loses its place, as a bank item does: back in stock, it goes
+	 * where the template puts it. A slot back in stock is drawn as itself again, where its placeholder was. Not
 	 * inside a script. True when the store's numbers changed.
 	 */
 	private boolean readStore()
 	{
+		refreshPlan();
 		boolean wasRead = store.hasRead();
 		Set<Integer> before = store.stockedKeys();
 		if (!store.readIfDirty())
@@ -636,8 +691,6 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		if (wasRead)
 		{
 			Set<Integer> now = store.stockedKeys();
-			int tab = view.depositSection();
-			now.stream().filter(k -> !before.contains(k)).forEach(k -> depositedTo.put(k, tab));
 			Set<Integer> refilled = savedOrder.placeholders();
 			refilled.retainAll(now);
 			savedOrder.fillPlaceholders(refilled);
@@ -654,10 +707,648 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		return true;
 	}
 
-	/** Where a stored potion new to the order goes: the tab it was deposited in, or the untabbed part. */
-	private int depositedTo(int key)
+	/**
+	 * Where a dose slot new to the order goes when none of its neighbours in the template is placed: the bank tab
+	 * "Bank place" names, or the untabbed part.
+	 */
+	private int newSection(int key)
 	{
-		return depositedTo.getOrDefault(key, BankArrangement.MAIN);
+		int s = config.bankPlace().section;
+		return s >= 1 ? s : BankArrangement.MAIN;
+	}
+
+	// ---- templates ----
+
+	/** The open template's slots, made again when it or the store's list of potions changed. Client thread. */
+	private void refreshPlan()
+	{
+		int v = templates.version();
+		boolean in = client.getGameState() == GameState.LOGGED_IN;
+		int count = in ? store.kinds().size() : 0;
+		if (v == planVersion && count == planPotions)
+		{
+			return;
+		}
+		planVersion = v;
+		planPotions = count;
+		store.setPlan(SlotPlan.of(templates.working(), in ? store.potions() : Collections.emptyList()));
+		visibility.reload();
+	}
+
+	/** The template changed: draw the bank and the panel from it again. Client thread. */
+	private void templateChanged()
+	{
+		refreshPlan();
+		visibility.reload();
+		relayout();
+		sendPotions();
+	}
+
+	/** A drag moved a dose slot: an edit to the open template's layout. */
+	private void placementEdited()
+	{
+		templates.placementEdited();
+		templateChanged();
+	}
+
+	private TemplateStore.Storage templateStorage()
+	{
+		return new TemplateStore.Storage()
+		{
+			@Override
+			public String account()
+			{
+				return configManager.getRSProfileKey();
+			}
+
+			@Override
+			public String get(String key)
+			{
+				return configManager.getRSProfileConfiguration(EnhancedPotionStorageConfig.GROUP, key);
+			}
+
+			@Override
+			public void set(String key, String value)
+			{
+				configManager.setRSProfileConfiguration(EnhancedPotionStorageConfig.GROUP, key, value);
+			}
+
+			@Override
+			public void unset(String key)
+			{
+				configManager.unsetRSProfileConfiguration(EnhancedPotionStorageConfig.GROUP, key);
+			}
+		};
+	}
+
+	private static Where whereOf(String key)
+	{
+		for (Where w : Where.values())
+		{
+			if (w.key.equals(key))
+			{
+				return w;
+			}
+		}
+		return Where.BANK;
+	}
+
+	/** The potions the open template hides in a place, for {@link PotionVisibility}. */
+	private String readHidden(String key)
+	{
+		return PotionVisibility.format(templates.working().hidden(whereOf(key)));
+	}
+
+	/** The panel hid or showed a potion: an edit to the open template. */
+	private void writeHidden(String key, String value)
+	{
+		Where w = whereOf(key);
+		Set<Integer> ids = PotionVisibility.parse(value);
+		clientThread.invokeLater(() ->
+		{
+			templates.edit(t -> t.setHidden(w, ids));
+			templateChanged();
+		});
+	}
+
+	private SlotPlan.Potion potion(int potionId)
+	{
+		for (SlotPlan.Potion p : store.potions())
+		{
+			if (p.id == potionId)
+			{
+				return p;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Give potion {@code p} the dose slots {@code next}, each slot of it that stays keeping its place in the bank:
+	 * {@code from[i]} is the index in its slots now of {@code next}'s {@code i}th, or -1 for a new one. A dose
+	 * taken out goes to "Recently removed".
+	 */
+	private void setDoses(SlotPlan.Potion p, List<Integer> next, int[] from)
+	{
+		List<Integer> now = SlotPlan.effectiveDoses(templates.working(), p);
+		List<Integer> oldKeys = SlotPlan.keysOf(p, now);
+		List<Integer> newKeys = SlotPlan.keysOf(p, next);
+		Map<Integer, Integer> renames = new HashMap<>();
+		boolean[] kept = new boolean[now.size()];
+		for (int i = 0; i < next.size(); i++)
+		{
+			if (from[i] >= 0)
+			{
+				renames.put(oldKeys.get(from[i]), newKeys.get(i));
+				kept[from[i]] = true;
+			}
+		}
+		// Before the edit, so a template it makes keeps the slots where they are.
+		savedOrder.renameStored(renames);
+		templates.edit(t ->
+		{
+			if (t.showAllDoses)
+			{
+				t.doses.clear();
+				t.showAllDoses = false;
+			}
+			t.doses.put(p.id, new ArrayList<>(next));
+		});
+		Set<Integer> stillThere = new HashSet<>(next);
+		for (int i = 0; i < now.size(); i++)
+		{
+			if (!kept[i] && !stillThere.contains(now.get(i)))
+			{
+				templates.recordRemoved(new Removed(p.id, now.get(i), oldKeys.get(i), Removed.How.DOSE_REMOVED));
+			}
+		}
+		refreshPlan();
+		sortStored();
+		templateChanged();
+	}
+
+	/** Each new slot matched to the first unmatched slot of the same dose now: keeps what can be kept. */
+	private static int[] matchByDose(List<Integer> now, List<Integer> next)
+	{
+		int[] from = new int[next.size()];
+		boolean[] used = new boolean[now.size()];
+		for (int i = 0; i < next.size(); i++)
+		{
+			from[i] = -1;
+			for (int j = 0; j < now.size(); j++)
+			{
+				if (!used[j] && now.get(j).equals(next.get(i)))
+				{
+					used[j] = true;
+					from[i] = j;
+					break;
+				}
+			}
+		}
+		return from;
+	}
+
+	/** The Doses submenu on a dose slot: that slot shows {@code dose} from now on, in the same place. */
+	private void changeSlotDose(Stack s, int dose)
+	{
+		SlotPlan.Potion p = potion(s.kind.id());
+		if (p == null || p.itemOf(dose) <= 0 || dose == s.dose)
+		{
+			return;
+		}
+		List<Integer> now = SlotPlan.effectiveDoses(templates.working(), p);
+		int at = SlotPlan.keysOf(p, now).indexOf(s.key);
+		if (at < 0)
+		{
+			return;
+		}
+		List<Integer> next = new ArrayList<>(now);
+		next.set(at, dose);
+		int[] from = new int[next.size()];
+		for (int i = 0; i < from.length; i++)
+		{
+			from[i] = i;
+		}
+		setDoses(p, next, from);
+	}
+
+	/** The template's order changed: the dose slots in each tab sorted into it, where they are. */
+	private void sortStored()
+	{
+		savedOrder.sortStored();
+	}
+
+	/**
+	 * "Bank place" changed: every dose slot, together, to the bank tab it names - or, for a bank tag, every dose
+	 * of every potion in the plan tagged with it, and taken out of {@code oldTag}'s.
+	 */
+	private void applyBankPlace(String oldTag)
+	{
+		refreshPlan();
+		BankPlace place = config.bankPlace();
+		String tag = config.bankPlaceTag() == null ? "" : config.bankPlaceTag().trim();
+		Set<Integer> ids = new HashSet<>();
+		for (SlotPlan.Slot s : store.plan().slots())
+		{
+			PotionStore.Kind k = store.kindOf(s.itemId);
+			if (k != null)
+			{
+				ids.addAll(k.doseIds);
+			}
+		}
+		if (oldTag != null && !oldTag.trim().isEmpty() && !(place == BankPlace.TAG && oldTag.trim().equalsIgnoreCase(tag)))
+		{
+			bankTags.removeTag(ids, oldTag.trim());
+		}
+		if (place == BankPlace.TAG)
+		{
+			if (!tag.isEmpty())
+			{
+				ids.forEach(id -> bankTags.addTag(id, tag, false));
+			}
+		}
+		else if (place.section >= 1 && client.getVarbitValue(BankWidgets.TAB_VARBITS[place.section - 1]) == 0)
+		{
+			client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", "Bank tab " + place.section
+				+ " has no items, and a potion from potion storage can't start a tab - put a bank item in it first.", null);
+			return;
+		}
+		else
+		{
+			savedOrder.moveAllStored(Math.max(place.section, BankArrangement.MAIN));
+		}
+		relayout();
+		sendPotions();
+	}
+
+	@Subscribe
+	public void onRuneScapeProfileChanged(RuneScapeProfileChanged e)
+	{
+		accountSettings.accountChanged();
+		clientThread.invokeLater(this::templateChanged);
+	}
+
+	/** What the template part of the sidebar panel shows. Client thread. */
+	private TemplatePanel.State panelState()
+	{
+		if (client.getGameState() != GameState.LOGGED_IN || configManager.getRSProfileKey() == null)
+		{
+			missing = Collections.emptyList();
+			return TemplatePanel.State.none();
+		}
+		Template w = templates.working();
+		List<SlotPlan.Potion> potions = store.potions();
+		Map<Integer, SlotPlan.Potion> byId = new HashMap<>();
+		potions.forEach(p -> byId.put(p.id, p));
+		List<Template.Category> categories = SlotPlan.categories(w, potions);
+		List<TemplatePanel.CategoryRow> rows = new ArrayList<>();
+		for (Template.Category c : categories)
+		{
+			List<TemplatePanel.PotionRow> ps = new ArrayList<>();
+			for (int id : c.potions)
+			{
+				SlotPlan.Potion p = byId.get(id);
+				PotionStore.Kind k = p == null ? null : store.kindOf(p.itemOf(p.naturalDoses().get(0)));
+				if (p != null && k != null)
+				{
+					ps.add(new TemplatePanel.PotionRow(p.id, p.name, p.naturalDoses(), SlotPlan.effectiveDoses(w, p),
+						store.doses(k) > 0));
+				}
+			}
+			rows.add(new TemplatePanel.CategoryRow(c.name, c.enabled, ps));
+		}
+		missing = missingSlots(w, categories, byId);
+		List<TemplatePanel.RemovedRow> removed = new ArrayList<>();
+		for (Removed r : templates.removed())
+		{
+			SlotPlan.Potion p = byId.get(r.potionId);
+			if (p == null || !stillMissing(r, w, p))
+			{
+				templates.forgetRemoved(r);
+				continue;
+			}
+			removed.add(new TemplatePanel.RemovedRow(r, p.name + " (" + r.dose + ")"
+				+ (r.how == Removed.How.DOSE_REMOVED ? " slot" : " placeholder")));
+		}
+		return new TemplatePanel.State(true, templates.names(), templates.activeName(), templates.dirty(), w.showAllDoses,
+			config.bankPlace(), config.bankPlaceTag() == null ? "" : config.bankPlaceTag(), rows, missing, removed);
+	}
+
+	private boolean stillMissing(Removed r, Template w, SlotPlan.Potion p)
+	{
+		if (r.how == Removed.How.DOSE_REMOVED)
+		{
+			return !SlotPlan.effectiveDoses(w, p).contains(r.dose);
+		}
+		return store.plan().slot(r.key) != null && !store.stockedKeys().contains(r.key)
+			&& !savedOrder.placeholders().contains(r.key);
+	}
+
+	/**
+	 * Every slot the layout asks for that the bank does not show: a run-out slot with no placeholder, and - when
+	 * not every dose shows - a dose taken out of a potion's slots. Only for potions in storage or with a
+	 * placeholder left, in categories that are on, shown in the bank.
+	 */
+	private List<TemplatePanel.Missing> missingSlots(Template w, List<Template.Category> categories,
+		Map<Integer, SlotPlan.Potion> byId)
+	{
+		List<TemplatePanel.Missing> out = new ArrayList<>();
+		if (!store.hasRead())
+		{
+			return out;
+		}
+		Set<Integer> stocked = store.stockedKeys();
+		Set<Integer> placeholders = savedOrder.placeholders();
+		for (Template.Category c : categories)
+		{
+			if (!c.enabled)
+			{
+				continue;
+			}
+			for (int id : c.potions)
+			{
+				SlotPlan.Potion p = byId.get(id);
+				PotionStore.Kind k = p == null ? null : store.kindOf(p.itemOf(p.naturalDoses().get(0)));
+				if (k == null || !visibility.shown(Where.BANK, id) || (k.unfinished && !config.showUnfinished()))
+				{
+					continue;
+				}
+				List<SlotPlan.Slot> slots = store.plan().slotsOf(id);
+				boolean has = store.doses(k) > 0 || slots.stream().anyMatch(s -> placeholders.contains(s.key));
+				if (!has)
+				{
+					continue;
+				}
+				List<TemplatePanel.Missing.Chip> chips = new ArrayList<>();
+				if (config.placeholders())
+				{
+					for (SlotPlan.Slot s : slots)
+					{
+						if (!stocked.contains(s.key) && !placeholders.contains(s.key))
+						{
+							chips.add(new TemplatePanel.Missing.Chip(id, s.dose, s.key, Removed.How.RELEASED));
+						}
+					}
+				}
+				if (!w.showAllDoses && p.hasDoseChoice())
+				{
+					List<Integer> doses = SlotPlan.effectiveDoses(w, p);
+					for (int d : p.naturalDoses())
+					{
+						if (!doses.contains(d))
+						{
+							chips.add(new TemplatePanel.Missing.Chip(id, d, -1, Removed.How.DOSE_REMOVED));
+						}
+					}
+				}
+				if (!chips.isEmpty())
+				{
+					out.add(new TemplatePanel.Missing(c.name, p.name, chips));
+				}
+			}
+		}
+		return out;
+	}
+
+	/** Put a missing slot back: a placeholder for a run-out one, the dose back into the slots for a removed one. */
+	private void restore(TemplatePanel.Missing.Chip chip)
+	{
+		if (chip.how == Removed.How.RELEASED)
+		{
+			savedOrder.addPlaceholders(List.of(chip.key));
+			return;
+		}
+		SlotPlan.Potion p = potion(chip.potionId);
+		if (p == null)
+		{
+			return;
+		}
+		List<Integer> now = SlotPlan.effectiveDoses(templates.working(), p);
+		if (now.contains(chip.dose))
+		{
+			return;
+		}
+		List<Integer> next = new ArrayList<>(now);
+		int at = 0;
+		while (at < next.size() && next.get(at) > chip.dose)
+		{
+			at++;
+		}
+		next.add(at, chip.dose);
+		setDoses(p, next, matchByDose(now, next));
+	}
+
+	/** The panel's actions, each carried out on the client thread. */
+	private final class PanelActions implements TemplatePanel.Actions
+	{
+		private void run(Runnable r)
+		{
+			clientThread.invokeLater(() ->
+			{
+				r.run();
+				templateChanged();
+			});
+		}
+
+		/** A change to the open template's categories, the bank's slots then sorted into the new order. */
+		private void edit(Consumer<Template> change)
+		{
+			run(() ->
+			{
+				templates.edit(change);
+				refreshPlan();
+				sortStored();
+			});
+		}
+
+		@Override
+		public void open(String name, boolean saveFirst)
+		{
+			run(() ->
+			{
+				if (saveFirst)
+				{
+					templates.save();
+				}
+				templates.open(name);
+			});
+		}
+
+		@Override
+		public void save()
+		{
+			run(templates::save);
+		}
+
+		@Override
+		public void saveAs(String name)
+		{
+			run(() -> templates.saveAs(name));
+		}
+
+		@Override
+		public void rename(String from, String to)
+		{
+			run(() -> templates.rename(from, to));
+		}
+
+		@Override
+		public void delete(String name)
+		{
+			run(() -> templates.delete(name));
+		}
+
+		@Override
+		public void export(String name, Consumer<String> then)
+		{
+			clientThread.invokeLater(() ->
+			{
+				String json = templates.export(name);
+				SwingUtilities.invokeLater(() -> then.accept(json));
+			});
+		}
+
+		@Override
+		public void importJson(String json)
+		{
+			run(() ->
+			{
+				String name = templates.importJson(json);
+				client.addChatMessage(ChatMessageType.GAMEMESSAGE, "", name == null
+					? "Enhanced Potion Storage: that file isn't a template."
+					: "Enhanced Potion Storage: imported the template \"" + name + "\". Pick it in the panel to open it.", null);
+			});
+		}
+
+		@Override
+		public void setShowAllDoses(boolean on)
+		{
+			edit(t -> t.showAllDoses = on);
+		}
+
+		@Override
+		public void setBankPlace(BankPlace place, String tag)
+		{
+			if (place == BankPlace.TAG)
+			{
+				configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, EnhancedPotionStorageConfig.TAG_KEY, tag);
+			}
+			configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, EnhancedPotionStorageConfig.PLACE_KEY, place);
+		}
+
+		@Override
+		public void restore(TemplatePanel.Missing.Chip chip)
+		{
+			run(() -> EnhancedPotionStoragePlugin.this.restore(chip));
+		}
+
+		@Override
+		public void restoreAll()
+		{
+			run(() ->
+			{
+				for (TemplatePanel.Missing m : missing)
+				{
+					m.chips.forEach(EnhancedPotionStoragePlugin.this::restore);
+				}
+			});
+		}
+
+		@Override
+		public void undo(Removed r)
+		{
+			run(() ->
+			{
+				templates.forgetRemoved(r);
+				EnhancedPotionStoragePlugin.this.restore(new TemplatePanel.Missing.Chip(r.potionId, r.dose, r.key, r.how));
+			});
+		}
+
+		@Override
+		public void setCategoryEnabled(int category, boolean on)
+		{
+			edit(t ->
+			{
+				if (category < t.categories.size())
+				{
+					t.categories.get(category).enabled = on;
+				}
+			});
+		}
+
+		@Override
+		public void moveCategory(int category, int by)
+		{
+			edit(t ->
+			{
+				int to = category + by;
+				if (category < t.categories.size() && to >= 0 && to < t.categories.size())
+				{
+					Collections.swap(t.categories, category, to);
+				}
+			});
+		}
+
+		@Override
+		public void renameCategory(int category, String name)
+		{
+			edit(t ->
+			{
+				if (category < t.categories.size())
+				{
+					t.categories.get(category).name = name;
+				}
+			});
+		}
+
+		@Override
+		public void addCategory(String name)
+		{
+			edit(t -> t.categories.add(new Template.Category(name, Collections.emptyList())));
+		}
+
+		@Override
+		public void deleteCategory(int category)
+		{
+			edit(t ->
+			{
+				if (category >= t.categories.size() || t.categories.size() <= 1)
+				{
+					return;
+				}
+				Template.Category gone = t.categories.remove(category);
+				t.categories.get(Math.max(category - 1, 0)).potions.addAll(gone.potions);
+			});
+		}
+
+		@Override
+		public void movePotion(int potionId, int by)
+		{
+			edit(t ->
+			{
+				Template.Category c = t.categoryOf(potionId);
+				if (c == null)
+				{
+					return;
+				}
+				int at = c.potions.indexOf(potionId);
+				int to = at + by;
+				if (to >= 0 && to < c.potions.size())
+				{
+					Collections.swap(c.potions, at, to);
+				}
+			});
+		}
+
+		@Override
+		public void movePotionTo(int potionId, int category)
+		{
+			edit(t ->
+			{
+				Template.Category from = t.categoryOf(potionId);
+				if (from == null || category >= t.categories.size())
+				{
+					return;
+				}
+				from.potions.remove(Integer.valueOf(potionId));
+				t.categories.get(category).potions.add(potionId);
+			});
+		}
+
+		@Override
+		public void setDoses(int potionId, List<Integer> doses)
+		{
+			run(() ->
+			{
+				SlotPlan.Potion p = potion(potionId);
+				if (p == null)
+				{
+					return;
+				}
+				List<Integer> now = SlotPlan.effectiveDoses(templates.working(), p);
+				EnhancedPotionStoragePlugin.this.setDoses(p, doses, matchByDose(now, doses));
+			});
+		}
 	}
 
 	/** The placeholders to draw beside {@code stocked}: one for each potion run out that left one. */
@@ -826,7 +1517,7 @@ public class EnhancedPotionStoragePlugin extends Plugin
 			learnedSignature = sig;
 			BankView.ServerBank server = view.readServer(bank);
 			savedOrder.learn(server.reals, store.stacks().stream().map(s -> s.key).collect(Collectors.toList()), server.existing,
-				this::depositedTo);
+				this::newSection);
 		}
 	}
 
@@ -876,14 +1567,27 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		{
 			removeStoredFromTag(e.getItemId());
 		}
+		else if (isWidgetOp(e.getMenuAction()) && e.getId() > 0xffff && frame.stackOn(e.getParam0()) != null
+			&& !frame.keepsOwnOptions(e.getParam0()))
+		{
+			// The Doses submenu on a dose slot: which dose the slot shows - this client's layout, nothing to the server.
+			e.consume();
+			changeSlotDose(frame.stackOn(e.getParam0()), (e.getId() >> 16) - 1 - PotionStore.DOSE_OP_BASE);
+		}
 		else if (isWidgetOp(e.getMenuAction()) && frame.isStored(e.getParam0()) && frame.stackOn(e.getParam0()).placeholder)
 		{
 			// A placeholder is this plugin's alone: nothing of it goes to the server.
 			e.consume();
 			if (BankWidgets.RELEASE.equals(Text.removeTags(e.getMenuOption() == null ? "" : e.getMenuOption())))
 			{
-				savedOrder.release(List.of(frame.stackOn(e.getParam0()).key));
+				Stack s = frame.stackOn(e.getParam0());
+				savedOrder.release(List.of(s.key));
+				templates.recordRemoved(new Removed(s.kind.id(), s.dose, s.key, Removed.How.RELEASED));
 				relayout();
+				if (sidebarShown())
+				{
+					sendPotions();
+				}
 			}
 		}
 		else if (isWidgetOp(e.getMenuAction()) && frame.withdrawsFromStore(e.getParam0()))
@@ -919,10 +1623,24 @@ public class EnhancedPotionStoragePlugin extends Plugin
 			}
 			return;
 		}
+		String option = Text.removeTags(e.getMenuOption() == null ? "" : e.getMenuOption());
+		if (!stack.active)
+		{
+			// Not the withdraw dose: its one option sets it - the store icon's own dose option, one click, one action.
+			if (!SET_DOSE.equals(option) || ownOptions)
+			{
+				e.consume();
+				return;
+			}
+			m.setParam1(InterfaceID.Bankmain.POTIONSTORE_ITEMS);
+			m.setParam0(PotionStore.iconChild(stack.kind.index));
+			m.setIdentifier(PotionStore.DOSE_OP_BASE + stack.dose);
+			return;
+		}
 		m.setParam1(InterfaceID.Bankmain.POTIONSTORE_ITEMS);
 		if (e.getId() > 0xffff)
 		{
-			// The Doses submenu: the sub-option's dose, on the icon.
+			// The Bank Tags plugin's Doses submenu, on a combined stack it drew: the sub-option's dose, on the icon.
 			m.setParam0(PotionStore.iconChild(stack.kind.index));
 			m.setIdentifier((e.getId() >> 16) - 1);
 			return;
@@ -932,7 +1650,11 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		{
 			ItemContainer bank = client.getItemContainer(InventoryID.BANK);
 			int alsoShown = ownOptions && bank != null ? bank.count(stack.itemId) : 0;
-			store.predictWithdraw(stack, Text.removeTags(e.getMenuOption() == null ? "" : e.getMenuOption()), widget, alsoShown);
+			if (store.predictWithdraw(stack, option, widget, alsoShown))
+			{
+				// Every other slot of the potion draws on the same doses: count them down too.
+				relayout();
+			}
 		}
 	}
 
@@ -990,19 +1712,6 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		return sidebar != null && sidebar.isShowing();
 	}
 
-	/** A visibility list, saved; an empty one is no setting at all. */
-	private void saveVisibility(String key, String value)
-	{
-		if (value.isEmpty())
-		{
-			configManager.unsetConfiguration(EnhancedPotionStorageConfig.GROUP, key);
-		}
-		else
-		{
-			configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, key, value);
-		}
-	}
-
 	/** Every potion the store keeps, with its doses as last read, to the sidebar panel. Client thread. */
 	private void sendPotions()
 	{
@@ -1026,7 +1735,12 @@ public class EnhancedPotionStoragePlugin extends Plugin
 			|| client.getVarbitValue(VarbitID.BANK_DEPOSITPOTION) != 0;
 		VisibilityPanel.Switches switches = new VisibilityPanel.Switches(config.inBank(), config.inTagTabs(),
 			config.inSearch(), config.showUnfinished(), config.sidebarCount() == SidebarCount.DOSES, depositsToStore);
-		SwingUtilities.invokeLater(() -> sidebar.update(potions, switches));
+		TemplatePanel.State state = panelState();
+		SwingUtilities.invokeLater(() ->
+		{
+			templatePanel.update(state);
+			sidebar.update(potions, switches);
+		});
 	}
 
 	// ---- drags ----

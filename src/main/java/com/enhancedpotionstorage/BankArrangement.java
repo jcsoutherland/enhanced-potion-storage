@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -188,6 +189,18 @@ final class BankArrangement
 	Resolved resolve(Map<Integer, List<Integer>> reals, Map<Integer, List<Integer>> previous, Collection<Integer> stored,
 		Set<Integer> existing, IntUnaryOperator newSection)
 	{
+		return resolve(reals, previous, stored, existing, newSection, key -> -1);
+	}
+
+	/**
+	 * As {@link #resolve(Map, Map, Collection, Set, IntUnaryOperator)}, with a stored stack new to the order put by
+	 * {@code rank} - its place in the template's order, -1 for none: just after the placed stack ranked closest
+	 * before it, or just before the one ranked closest after it, in whatever section that one is in. Only with
+	 * no ranked stack placed does it go to the end of {@code newSection}'s section.
+	 */
+	Resolved resolve(Map<Integer, List<Integer>> reals, Map<Integer, List<Integer>> previous, Collection<Integer> stored,
+		Set<Integer> existing, IntUnaryOperator newSection, IntUnaryOperator rank)
+	{
 		boolean changed = followRenumbering(reals);
 		List<Entry> homeless = new ArrayList<>();
 		changed |= dropVanishedTabs(existing, homeless);
@@ -199,7 +212,7 @@ final class BankArrangement
 		{
 			int s = newSection.applyAsInt(key);
 			return existing.contains(s) ? s : MAIN;
-		});
+		}, rank);
 		return new Resolved(drawn(reals, new HashSet<>(stored)), changed);
 	}
 
@@ -434,9 +447,12 @@ final class BankArrangement
 		return true;
 	}
 
-	/** After the real items, so a stack new to the bank's view starts out behind them. */
+	/**
+	 * Next to its neighbours in {@code rank}'s order, when one is placed; otherwise after the real items, so a
+	 * stack new to the bank's view starts out behind them.
+	 */
 	private boolean placeNewStored(List<Entry> homeless, Collection<Integer> stored, Set<Integer> placed,
-		IntUnaryOperator newSection)
+		IntUnaryOperator newSection, IntUnaryOperator rank)
 	{
 		boolean changed = false;
 		for (Entry e : homeless)
@@ -450,8 +466,180 @@ final class BankArrangement
 		{
 			if (placed.add(key))
 			{
-				list(newSection.applyAsInt(key)).add(Entry.stored(key));
+				if (!insertByRank(Entry.stored(key), rank))
+				{
+					list(newSection.applyAsInt(key)).add(Entry.stored(key));
+				}
 				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	/** Just after the stored stack ranked closest before {@code e}, or just before the one closest after. */
+	private boolean insertByRank(Entry e, IntUnaryOperator rank)
+	{
+		int r = rank.applyAsInt(e.id);
+		if (r < 0)
+		{
+			return false;
+		}
+		List<Entry> beforeList = null;
+		int beforeAt = -1;
+		int beforeRank = -1;
+		List<Entry> afterList = null;
+		int afterAt = -1;
+		int afterRank = Integer.MAX_VALUE;
+		for (List<Entry> l : sections.values())
+		{
+			for (int i = 0; i < l.size(); i++)
+			{
+				Entry o = l.get(i);
+				int or = o.stored ? rank.applyAsInt(o.id) : -1;
+				if (or < 0 || o.equals(e))
+				{
+					continue;
+				}
+				if (or < r && or > beforeRank)
+				{
+					beforeList = l;
+					beforeAt = i;
+					beforeRank = or;
+				}
+				else if (or > r && or < afterRank)
+				{
+					afterList = l;
+					afterAt = i;
+					afterRank = or;
+				}
+			}
+		}
+		if (beforeList != null)
+		{
+			beforeList.add(beforeAt + 1, e);
+			return true;
+		}
+		if (afterList != null)
+		{
+			afterList.add(afterAt, e);
+			return true;
+		}
+		return false;
+	}
+
+	/** Every stored stack forgotten: each is placed as new the next time it is seen. */
+	boolean clearStored()
+	{
+		boolean changed = false;
+		for (List<Entry> l : sections.values())
+		{
+			changed |= l.removeIf(e -> e.stored);
+		}
+		return changed;
+	}
+
+	/** Stored stacks known by new keys, {@code renames} from old to new; one renamed onto another takes its place. */
+	boolean renameStored(Map<Integer, Integer> renames)
+	{
+		boolean changed = false;
+		for (List<Entry> l : sections.values())
+		{
+			for (int i = 0; i < l.size(); i++)
+			{
+				Entry e = l.get(i);
+				Integer to = e.stored ? renames.get(e.id) : null;
+				if (to != null && to != e.id)
+				{
+					l.set(i, Entry.stored(to));
+					changed = true;
+				}
+			}
+		}
+		// Two renamed onto one key: the first keeps its place.
+		Set<Integer> seen = new HashSet<>();
+		for (List<Entry> l : sections.values())
+		{
+			changed |= l.removeIf(e -> e.stored && !seen.add(e.id));
+		}
+		return changed;
+	}
+
+	/**
+	 * Every stored stack, together at the end of {@code section} in {@code rank}'s order - the ranked first, then
+	 * the rest as they were.
+	 */
+	void moveAllStored(int section, IntUnaryOperator rank)
+	{
+		List<Entry> all = new ArrayList<>();
+		for (List<Entry> l : sections.values())
+		{
+			l.stream().filter(e -> e.stored).forEach(all::add);
+			l.removeIf(e -> e.stored);
+		}
+		List<Entry> ranked = all.stream().filter(e -> rank.applyAsInt(e.id) >= 0)
+			.sorted((a, b) -> Integer.compare(rank.applyAsInt(a.id), rank.applyAsInt(b.id)))
+			.collect(Collectors.toList());
+		all.stream().filter(e -> rank.applyAsInt(e.id) < 0).forEach(ranked::add);
+		list(section).addAll(ranked);
+	}
+
+	/**
+	 * The stored stacks placed as {@code saved} has them - a template's saved arrangement - among the real items
+	 * as they are now: each after the real item it followed there, or after the last one before that which is
+	 * still in its section, everything else shifting as a bank does. A section of {@code saved} the bank no
+	 * longer has gives its stacks to the untabbed part when next resolved.
+	 */
+	void placeStoredAs(BankArrangement saved)
+	{
+		clearStored();
+		saved.sections.forEach((s, savedList) ->
+		{
+			List<Entry> l = list(s);
+			int at = 0;
+			for (Entry e : savedList)
+			{
+				if (!e.stored)
+				{
+					int i = l.indexOf(e);
+					if (i >= 0)
+					{
+						at = i + 1;
+					}
+					continue;
+				}
+				l.add(Math.min(at, l.size()), e);
+				at = Math.min(at, l.size() - 1) + 1;
+			}
+		});
+	}
+
+	/**
+	 * In each section, the stored stacks {@code rank} knows sorted into its order, in the places they take up
+	 * there now: the template's order changed, and where the slots are stays as it was.
+	 */
+	boolean sortStored(IntUnaryOperator rank)
+	{
+		boolean changed = false;
+		for (List<Entry> l : sections.values())
+		{
+			List<Integer> at = new ArrayList<>();
+			List<Entry> ranked = new ArrayList<>();
+			for (int i = 0; i < l.size(); i++)
+			{
+				if (l.get(i).stored && rank.applyAsInt(l.get(i).id) >= 0)
+				{
+					at.add(i);
+					ranked.add(l.get(i));
+				}
+			}
+			ranked.sort((a, b) -> Integer.compare(rank.applyAsInt(a.id), rank.applyAsInt(b.id)));
+			for (int j = 0; j < at.size(); j++)
+			{
+				if (!l.get(at.get(j)).equals(ranked.get(j)))
+				{
+					l.set(at.get(j), ranked.get(j));
+					changed = true;
+				}
 			}
 		}
 		return changed;

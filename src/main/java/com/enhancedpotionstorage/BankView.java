@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -42,6 +43,7 @@ import static com.enhancedpotionstorage.BankWidgets.RELEASE_OP;
 import static com.enhancedpotionstorage.BankWidgets.ROW;
 import static com.enhancedpotionstorage.BankWidgets.SECTIONS;
 import static com.enhancedpotionstorage.BankWidgets.SECTION_GAP;
+import static com.enhancedpotionstorage.BankWidgets.SET_DOSE;
 import static com.enhancedpotionstorage.BankWidgets.SEPARATOR_BASE;
 import static com.enhancedpotionstorage.BankWidgets.STRIP_BASE;
 import static com.enhancedpotionstorage.BankWidgets.WITHDRAW;
@@ -666,7 +668,8 @@ final class BankView
 			else
 			{
 				c.setItemQuantity(bank.count(real) + s.quantity);
-				if (storageFirst)
+				// The store pays out its withdraw dose, so only a slot at that dose can withdraw for this stack.
+				if (storageFirst && s.active)
 				{
 					frame.putCombined(i, s, true);
 				}
@@ -691,6 +694,16 @@ final class BankView
 		c.setItemQuantityMode(ItemQuantityMode.STACKABLE);
 		c.setName("<col=ff9040>" + s.name + "</col>");
 		c.clearActions();
+		if (!s.active)
+		{
+			// Not the store's withdraw dose: a click sets it, and only that - no withdraw options to mislead.
+			c.setAction(0, SET_DOSE);
+			addDosesMenu(c, s);
+			c.setOpacity(s.quantity > 0 ? 0 : EMPTY_OPACITY);
+			c.setOnDragListener(ScriptID.BANKMAIN_DRAGSCROLL, ScriptEvent.WIDGET_ID, ScriptEvent.WIDGET_INDEX,
+				ScriptEvent.MOUSE_X, ScriptEvent.MOUSE_Y, InterfaceID.Bankmain.SCROLLBAR, 0);
+			return;
+		}
 		int quantityType = client.getVarbitValue(VarbitID.BANK_QUANTITY_TYPE);
 		int requested = client.getVarbitValue(VarbitID.BANK_REQUESTEDQUANTITY);
 		c.setAction(0, WITHDRAW + defaultWithdraw(quantityType, requested));
@@ -707,14 +720,7 @@ final class BankView
 		c.setAction(5, WITHDRAW + "X");
 		c.setAction(6, WITHDRAW + "All");
 		c.setAction(7, WITHDRAW_ALL_BUT_ONE);
-		if (!s.kind.doses.isEmpty())
-		{
-			c.setAction(DOSES_OP, DOSES);
-			for (int d : s.kind.doses)
-			{
-				c.setSubOp(DOSES_OP, 5 + d, d + " Dose");
-			}
-		}
+		addDosesMenu(c, s);
 		// Faded like a placeholder while a withdrawal of the last of it is still on its way.
 		c.setOpacity(s.quantity > 0 ? 0 : EMPTY_OPACITY);
 		c.setOnDragListener(ScriptID.BANKMAIN_DRAGSCROLL, ScriptEvent.WIDGET_ID, ScriptEvent.WIDGET_INDEX,
@@ -731,9 +737,27 @@ final class BankView
 		c.setName("<col=ff9040>" + s.name + "</col>");
 		c.clearActions();
 		c.setAction(RELEASE_OP, RELEASE);
+		addDosesMenu(c, s);
 		c.setOpacity(EMPTY_OPACITY);
 		c.setOnDragListener(ScriptID.BANKMAIN_DRAGSCROLL, ScriptEvent.WIDGET_ID, ScriptEvent.WIDGET_INDEX,
 			ScriptEvent.MOUSE_X, ScriptEvent.MOUSE_Y, InterfaceID.Bankmain.SCROLLBAR, 0);
+	}
+
+	/**
+	 * The Doses submenu: which dose this slot shows. A change to the layout only, made in this client - setting
+	 * the store's withdraw dose is the slot's own Set-dose.
+	 */
+	private static void addDosesMenu(Widget c, Stack s)
+	{
+		if (!s.hasDoseChoice())
+		{
+			return;
+		}
+		c.setAction(DOSES_OP, DOSES);
+		for (int d : s.kind.doses)
+		{
+			c.setSubOp(DOSES_OP, PotionStore.DOSE_OP_BASE + d, d + " Dose");
+		}
 	}
 
 	/** The amount on a bank stack's left-click option, by the bank's quantity setting. */

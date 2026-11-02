@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -29,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -48,15 +50,21 @@ import net.runelite.api.widgets.WidgetType;
 
 /**
  * The bank's potion storage: what it holds, read through the game's own scripts the moment its varps change,
- * and the withdrawals clicked but not yet answered.
+ * and the withdrawals clicked but not yet answered - as dose slots, one for each dose the template asks for
+ * ({@link SlotPlan}).
  * <p>
  * The store lists every potion kind it knows, held or not, in a fixed order, and builds five widgets per kind
  * in that order: the withdraw row, the icon (which carries the doses), the name, the dose count and the
  * favourite star. A click is pointed at a kind's row or icon by that order alone.
+ * <p>
+ * The store pays a potion out at one dose at a time: its withdraw dose, set with the icon's dose options. Every
+ * slot counts what it could pay at its own dose, but only a slot at the withdraw dose withdraws.
  */
 final class PotionStore
 {
 	static final int COMPONENTS_PER_POTION = 5;
+	/** The store icon's dose options are its ops 6 to 9: this plus the dose. */
+	static final int DOSE_OP_BASE = 5;
 
 	/** The varps the store's doses live in; the store widget's own transmit list adds to these once seen. */
 	private static final Set<Integer> BASE_VARS = Set.of(
@@ -92,6 +100,8 @@ final class PotionStore
 		final List<Integer> doses;
 		/** The doses in one whole potion: its largest dose, 1 for an unfinished potion. */
 		final int fullDose;
+		/** Item id by dose. */
+		final Map<Integer, Integer> itemsByDose;
 
 		Kind(int index, int enumId, EnumComposition potionEnum, boolean unfinished)
 		{
@@ -101,6 +111,7 @@ final class PotionStore
 			this.unfinished = unfinished;
 			List<Integer> ids = new ArrayList<>();
 			List<Integer> numbers = new ArrayList<>();
+			Map<Integer, Integer> byDose = new LinkedHashMap<>();
 			for (int d = 1; d <= 4; d++)
 			{
 				int id = potionEnum.getIntValue(d);
@@ -108,14 +119,16 @@ final class PotionStore
 				{
 					ids.add(id);
 					numbers.add(d);
+					byDose.put(d, id);
 				}
 			}
 			this.doseIds = Collections.unmodifiableList(ids);
 			this.doses = numbers.size() > 1 && !unfinished ? Collections.unmodifiableList(numbers) : Collections.emptyList();
 			this.fullDose = numbers.isEmpty() ? 1 : numbers.get(numbers.size() - 1);
+			this.itemsByDose = Collections.unmodifiableMap(byDose);
 		}
 
-		/** What the visibility settings know it by: its smallest dose's item id, which no other kind shares. */
+		/** What the visibility settings and templates know it by: its smallest dose's item id, which no other kind shares. */
 		int id()
 		{
 			return doseIds.isEmpty() ? -1 : doseIds.get(0);
@@ -128,28 +141,26 @@ final class PotionStore
 		}
 	}
 
-	/** One stack the store can pay out, as the plugin draws it. */
+	/** One dose slot the store can pay out, as the plugin draws it. */
 	static final class Stack
 	{
-		/** What the saved order knows it by: the 1-dose id, or the dose paid out when there is no 1-dose. */
+		/** What the saved order knows it by: the slot's key ({@link SlotPlan#key}). */
 		final int key;
-		/** What a withdrawal hands over: the potion at the store's withdraw dose. */
+		/** The potion at the slot's dose. */
 		final int itemId;
-		/** Potions a withdrawal could take, less any withdrawal still in flight. */
+		/** Potions of the slot's dose the store could pay, less any withdrawal still in flight. */
 		final int quantity;
 		final String name;
 		final Kind kind;
-		/** Every item id it might be tagged as: the dose paid out, then each dose. */
+		final int dose;
+		/** The store's withdraw dose is this slot's, so it withdraws; otherwise a click sets the withdraw dose to it. */
+		final boolean active;
+		/** Every item id it might be tagged as: its dose, then each other dose. */
 		final List<Integer> ids;
 		/** Run out, and kept in its place as a placeholder: holds nothing, withdraws nothing. */
 		final boolean placeholder;
 
-		Stack(int key, int itemId, int quantity, String name, Kind kind)
-		{
-			this(key, itemId, quantity, name, kind, false);
-		}
-
-		Stack(int key, int itemId, int quantity, String name, Kind kind, boolean placeholder)
+		Stack(int key, int itemId, int quantity, String name, Kind kind, int dose, boolean active, boolean placeholder)
 		{
 			this.placeholder = placeholder;
 			this.key = key;
@@ -157,24 +168,32 @@ final class PotionStore
 			this.quantity = quantity;
 			this.name = name;
 			this.kind = kind;
+			this.dose = dose;
+			this.active = active;
 			List<Integer> all = new ArrayList<>();
 			all.add(itemId);
 			kind.doseIds.stream().filter(id -> id != itemId).forEach(all::add);
 			this.ids = Collections.unmodifiableList(all);
 		}
+
+		/** One with a choice of doses to show and to set. */
+		boolean hasDoseChoice()
+		{
+			return !kind.doses.isEmpty();
+		}
 	}
 
-	/** Potions taken by clicks the server has not answered yet, counted from {@code base}, the stock when clicked. */
+	/** Doses taken by clicks the server has not answered yet, counted from {@code base}, the doses when clicked. */
 	private static final class Pending
 	{
-		int taken;
+		int takenDoses;
+		int takenPotions;
 		int base;
 		int tick;
 
-		Pending(int base, int tick)
+		Pending(int base)
 		{
 			this.base = base;
-			this.tick = tick;
 		}
 	}
 
@@ -185,7 +204,8 @@ final class PotionStore
 	private int[] withdraw = new int[0];
 	private boolean dirty = true;
 	private Set<Integer> vars = BASE_VARS;
-	private final Map<Integer, Pending> pending = new HashMap<>(); // potion key -> withdrawals in flight
+	private final Map<Integer, Pending> pending = new HashMap<>(); // kind index -> withdrawals in flight
+	private SlotPlan plan = SlotPlan.empty();
 
 	PotionStore(Client client)
 	{
@@ -201,6 +221,17 @@ final class PotionStore
 		dirty = true;
 		vars = BASE_VARS;
 		pending.clear();
+	}
+
+	/** The slots to draw from now on. Client thread. */
+	void setPlan(SlotPlan plan)
+	{
+		this.plan = plan;
+	}
+
+	SlotPlan plan()
+	{
+		return plan;
 	}
 
 	void varpChanged(int varpId)
@@ -285,28 +316,45 @@ final class PotionStore
 		}
 	}
 
-	/** Potions of {@code kind} a withdrawal could take, by the server's last word. */
-	private int stock(Kind kind)
+	/** The store's withdraw dose for {@code kind}: 0 before a read. */
+	int withdrawDose(Kind kind)
 	{
-		int i = kind.index;
-		int w = i < withdraw.length ? withdraw[i] : 0;
-		return w > 0 && i < doses.length ? doses[i] / w : 0;
+		return kind.index < withdraw.length ? withdraw[kind.index] : 0;
 	}
 
-	private int keyOf(Kind k)
+	/** Potions of {@code kind} at {@code dose} the store could pay, by the server's last word. */
+	private int stock(Kind kind, int dose)
 	{
-		int one = k.potionEnum.getIntValue(1);
-		if (one > 0)
+		return dose > 0 ? doses(kind) / dose : 0;
+	}
+
+	/** Potions of {@code kind} at {@code dose} the store could pay, less what is in flight. */
+	private int shown(Kind kind, int dose)
+	{
+		Pending p = pending.get(kind.index);
+		return dose > 0 ? Math.max(doses(kind) - (p == null ? 0 : p.takenDoses), 0) / dose : 0;
+	}
+
+	/** The slot's dose is the one the store pays out - always, for a potion with one dose. */
+	boolean isActive(Kind kind, int dose)
+	{
+		return kind.doses.isEmpty() || withdrawDose(kind) == dose;
+	}
+
+	private Map<Integer, Kind> kindsById()
+	{
+		Map<Integer, Kind> out = new HashMap<>();
+		if (kinds != null)
 		{
-			return one;
+			kinds.forEach(k -> out.put(k.id(), k));
 		}
-		int w = k.index < withdraw.length && withdraw[k.index] > 0 ? withdraw[k.index] : 1;
-		return k.potionEnum.getIntValue(w);
+		return out;
 	}
 
 	/**
-	 * Every potion the store can pay out, in the store's own order, less what is in flight. Empty until it has
-	 * been read. The store's empty vials are left out on purpose: they are not something anyone banks for.
+	 * Every dose slot the plan asks for that the store can pay at least one potion of, in the plan's order, less
+	 * what is in flight. Empty until the store has been read. The store's empty vials are left out on purpose:
+	 * they are not something anyone banks for.
 	 */
 	List<Stack> stacks()
 	{
@@ -314,17 +362,15 @@ final class PotionStore
 		{
 			return Collections.emptyList();
 		}
+		Map<Integer, Kind> byId = kindsById();
 		List<Stack> out = new ArrayList<>();
-		for (Kind k : kinds)
+		for (SlotPlan.Slot s : plan.slots())
 		{
-			int stock = stock(k);
-			if (stock > 0)
+			Kind k = byId.get(s.potionId);
+			if (k != null && stock(k, s.dose) > 0)
 			{
-				int key = keyOf(k);
-				Pending p = pending.get(key);
-				int itemId = k.potionEnum.getIntValue(withdraw[k.index]);
-				out.add(new Stack(key, itemId, Math.max(stock - (p == null ? 0 : p.taken), 0),
-					client.getItemDefinition(itemId).getName(), k));
+				out.add(new Stack(s.key, s.itemId, shown(k, s.dose), client.getItemDefinition(s.itemId).getName(), k,
+					s.dose, isActive(k, s.dose), false));
 			}
 		}
 		return out;
@@ -343,6 +389,26 @@ final class PotionStore
 		return Collections.unmodifiableList(kinds);
 	}
 
+	/** Every potion kind as a template knows it, named without its dose. Client thread. */
+	List<SlotPlan.Potion> potions()
+	{
+		List<SlotPlan.Potion> out = new ArrayList<>();
+		for (Kind k : kinds())
+		{
+			if (k.id() > 0)
+			{
+				out.add(new SlotPlan.Potion(k.id(), nameOf(k), k.unfinished, k.index, k.itemsByDose));
+			}
+		}
+		return out;
+	}
+
+	/** A potion's name without its dose: "Saradomin brew". */
+	String nameOf(Kind k)
+	{
+		return client.getItemDefinition(k.iconId()).getName().replaceAll("\\s*\\(\\d\\)$", "");
+	}
+
 	/** The doses of {@code kind} the store holds, by its last read: 0 before one. */
 	int doses(Kind kind)
 	{
@@ -355,44 +421,36 @@ final class PotionStore
 		return doses.length > 0;
 	}
 
-	/** The potions, by key, the store holds any of by the server's numbers. Empty until it has been read. */
+	/** The slots, by key, the store can pay any of by the server's numbers. Empty until it has been read. */
 	Set<Integer> stockedKeys()
 	{
 		Set<Integer> out = new HashSet<>();
 		if (kinds != null)
 		{
-			for (Kind k : kinds)
+			Map<Integer, Kind> byId = kindsById();
+			for (SlotPlan.Slot s : plan.slots())
 			{
-				if (stock(k) > 0)
+				Kind k = byId.get(s.potionId);
+				if (k != null && stock(k, s.dose) > 0)
 				{
-					out.add(keyOf(k));
+					out.add(s.key);
 				}
 			}
 		}
 		return out;
 	}
 
-	/** A placeholder for the potion known as {@code key}, drawn as the dose it was paid out at; null if none. */
+	/** A placeholder for the slot known as {@code key}, drawn as its dose; null when the plan has no such slot. */
 	Stack placeholder(int key)
 	{
-		if (kinds == null)
+		SlotPlan.Slot s = plan.slot(key);
+		Kind k = s == null || kinds == null ? null : kindsById().get(s.potionId);
+		if (k == null)
 		{
 			return null;
 		}
-		for (Kind k : kinds)
-		{
-			if (keyOf(k) == key)
-			{
-				int dose = k.index < withdraw.length && withdraw[k.index] > 0 ? withdraw[k.index] : k.fullDose;
-				int itemId = k.potionEnum.getIntValue(dose);
-				if (itemId <= 0)
-				{
-					itemId = k.iconId();
-				}
-				return new Stack(key, itemId, 0, client.getItemDefinition(itemId).getName(), k, true);
-			}
-		}
-		return null;
+		return new Stack(key, s.itemId, 0, client.getItemDefinition(s.itemId).getName(), k, s.dose,
+			isActive(k, s.dose), true);
 	}
 
 	/** Every dose of every potion kind {@code which} picks. Empty until the store has been read. */
@@ -406,7 +464,7 @@ final class PotionStore
 		return out;
 	}
 
-	/** The stack the store pays out as {@code itemId}; null when it pays out no such potion. */
+	/** A slot the store pays out as {@code itemId}; null when it pays out no such potion. */
 	Stack stackOf(int itemId)
 	{
 		for (Stack s : stacks())
@@ -438,25 +496,24 @@ final class PotionStore
 	/** New numbers from the server: count off what they show of each withdrawal in flight. */
 	private void settle()
 	{
-		Map<Integer, Kind> byKey = new HashMap<>();
-		kinds.forEach(k -> byKey.put(keyOf(k), k));
 		pending.entrySet().removeIf(entry ->
 		{
-			Kind k = byKey.get(entry.getKey());
-			if (k == null)
+			int i = entry.getKey();
+			if (kinds == null || i >= kinds.size())
 			{
 				return true;
 			}
 			Pending p = entry.getValue();
-			int now = stock(k);
+			int now = doses(kinds.get(i));
 			int landed = p.base - now;
 			if (now == p.base)
 			{
 				return false;
 			}
-			if (landed > 0 && landed < p.taken)
+			if (landed > 0 && landed < p.takenDoses)
 			{
-				p.taken -= landed;
+				p.takenDoses -= landed;
+				p.takenPotions = Math.max(p.takenPotions - landed / Math.max(withdrawDose(kinds.get(i)), 1), 0);
 				p.base = now;
 				p.tick = client.getTickCount();
 				return false;
@@ -473,23 +530,21 @@ final class PotionStore
 	}
 
 	/**
-	 * Count a withdrawal off its stack now rather than a round trip later. The amount is what the option says,
-	 * no more than the stack holds or - unless withdrawing as notes - the inventory has room for. X and the
-	 * Doses submenu are left to the server: neither says how many it takes. The server's numbers replace the
-	 * guess when they come ({@link #settle()}), or it is dropped after {@link #PENDING_TICKS} ticks without
-	 * another click on it. {@code alsoShown} is what the widget shows besides the store's count - a bank
-	 * stack's own, on a combined stack.
+	 * Count a withdrawal off its stack now rather than a round trip later - off every slot of the potion, as all
+	 * of them draw on the same doses. The amount is what the option says, no more than the stack holds or -
+	 * unless withdrawing as notes - the inventory has room for. X and the Doses submenu are left to the server:
+	 * neither says how many it takes. The server's numbers replace the guess when they come ({@link #settle()}),
+	 * or it is dropped after {@link #PENDING_TICKS} ticks without another click on it. {@code alsoShown} is what
+	 * the widget shows besides the store's count - a bank stack's own, on a combined stack. True when it counted.
 	 */
-	void predictWithdraw(Stack s, String option, Widget w, int alsoShown)
+	boolean predictWithdraw(Stack s, String option, Widget w, int alsoShown)
 	{
-		if (!option.startsWith(BankWidgets.WITHDRAW))
+		if (!s.active || !option.startsWith(BankWidgets.WITHDRAW))
 		{
-			return;
+			return false;
 		}
 		String what = option.substring(BankWidgets.WITHDRAW.length());
-		Pending inFlight = pending.get(s.key);
-		int stock = stock(s.kind);
-		int shown = stock - (inFlight == null ? 0 : inFlight.taken);
+		int shown = shown(s.kind, s.dose);
 		int n;
 		if (what.equals("All"))
 		{
@@ -507,27 +562,28 @@ final class PotionStore
 			}
 			catch (NumberFormatException ex)
 			{
-				return;
+				return false;
 			}
 		}
 		if (client.getVarbitValue(VarbitID.BANK_WITHDRAWNOTES) == 0)
 		{
-			n = Math.min(n, freeSlots() - pending.values().stream().mapToInt(p -> p.taken).sum());
+			n = Math.min(n, freeSlots() - pending.values().stream().mapToInt(p -> p.takenPotions).sum());
 		}
 		n = Math.min(n, shown);
 		if (n <= 0)
 		{
-			return;
+			return false;
 		}
-		Pending p = inFlight != null ? inFlight : new Pending(stock, 0);
-		pending.put(s.key, p);
-		p.taken += n;
+		Pending p = pending.computeIfAbsent(s.kind.index, i -> new Pending(doses(s.kind)));
+		p.takenDoses += n * s.dose;
+		p.takenPotions += n;
 		p.tick = client.getTickCount();
 		w.setItemQuantity(alsoShown + shown - n);
 		if (alsoShown + shown - n == 0)
 		{
 			w.setOpacity(BankWidgets.EMPTY_OPACITY);
 		}
+		return true;
 	}
 
 	private int freeSlots()

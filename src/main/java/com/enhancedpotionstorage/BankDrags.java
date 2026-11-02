@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without

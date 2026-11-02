@@ -181,6 +181,15 @@ final class BankTagsBridge
 		}
 	}
 
+	/** Take {@code tag} off every one of {@code itemIds}. */
+	void removeTag(Collection<Integer> itemIds, String tag)
+	{
+		if (tagManager != null)
+		{
+			itemIds.forEach(id -> tagManager.removeTag(id, tag));
+		}
+	}
+
 	/**
 	 * Take every dose of a potion out of the open tag - its tags and its layout cells. The Bank Tags plugin's
 	 * own Remove-tag takes out the dose the stored stack is drawn as and no other, so a cell or a tag holding

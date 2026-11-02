@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -73,6 +74,8 @@ final class BankWidgets
 	/** A stored potion's Doses submenu, in place of Examine; its sub-ops are 5 + the dose. */
 	static final int DOSES_OP = 10;
 	static final String DOSES = "Doses";
+	/** A dose slot that is not the store's withdraw dose: its one option, which sets it. */
+	static final String SET_DOSE = "Set-dose";
 
 	static final int[] TAB_VARBITS = {
 		VarbitID.BANK_TAB_1, VarbitID.BANK_TAB_2, VarbitID.BANK_TAB_3, VarbitID.BANK_TAB_4, VarbitID.BANK_TAB_5,

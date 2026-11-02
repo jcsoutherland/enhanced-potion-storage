@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -56,12 +57,26 @@ final class SavedOrder
 
 	private String account;
 	private BankArrangement arrangement = new BankArrangement();
+	/** A stored stack's place in the template's order, which is where one new to the order goes; -1 for none. */
+	private volatile IntUnaryOperator rank = key -> -1;
 	private Map<Integer, List<Integer>> lastServer;
 	private Set<Integer> placeholders = new TreeSet<>();
+	/** Told when a drag moves a stored stack: an edit to the open template. */
+	private Runnable storedMoved = () -> { };
 
 	SavedOrder(ConfigManager configManager)
 	{
 		this.configManager = configManager;
+	}
+
+	void setRank(IntUnaryOperator rank)
+	{
+		this.rank = rank;
+	}
+
+	void setStoredMoved(Runnable storedMoved)
+	{
+		this.storedMoved = storedMoved;
 	}
 
 	/** The config keys this keeps, which are not settings. */
@@ -136,7 +151,7 @@ final class SavedOrder
 		IntUnaryOperator newSection)
 	{
 		load();
-		return arrangement.copy().resolve(reals, lastServer, stored, existing, newSection);
+		return arrangement.copy().resolve(reals, lastServer, stored, existing, newSection, rank);
 	}
 
 	/** Fold a settled bank into what is kept, and remember it as the server's order last seen. */
@@ -144,7 +159,7 @@ final class SavedOrder
 		IntUnaryOperator newSection)
 	{
 		load();
-		if (arrangement.resolve(reals, lastServer, stored, existing, newSection).changed)
+		if (arrangement.resolve(reals, lastServer, stored, existing, newSection, rank).changed)
 		{
 			saveArrangement();
 		}
@@ -160,14 +175,97 @@ final class SavedOrder
 	void move(Map<Integer, List<Entry>> drawn, Pos from, Pos to, BankArrangement.Drop how)
 	{
 		load();
+		boolean stored = storedAt(drawn, from) || storedAt(drawn, to);
 		arrangement.move(drawn, from, to, how);
 		saveArrangement();
+		if (stored)
+		{
+			storedMoved.run();
+		}
 	}
 
 	void moveToEnd(Map<Integer, List<Entry>> drawn, Pos from, int section)
 	{
 		load();
+		boolean stored = storedAt(drawn, from);
 		arrangement.moveToEnd(drawn, from, section);
+		saveArrangement();
+		if (stored)
+		{
+			storedMoved.run();
+		}
+	}
+
+	private static boolean storedAt(Map<Integer, List<Entry>> drawn, Pos p)
+	{
+		List<Entry> l = p == null ? null : drawn.get(p.section);
+		return l != null && p.index < l.size() && l.get(p.index).stored;
+	}
+
+	/** The order as saved, for a template to keep. */
+	String encodeArrangement()
+	{
+		load();
+		return arrangement.encode();
+	}
+
+	/** Stored stacks known by new keys - a slot's dose changed - and their placeholders with them. */
+	void renameStored(Map<Integer, Integer> renames)
+	{
+		load();
+		if (arrangement.renameStored(renames))
+		{
+			saveArrangement();
+		}
+		Set<Integer> p = new TreeSet<>();
+		boolean changed = false;
+		for (int key : placeholders)
+		{
+			Integer to = renames.get(key);
+			p.add(to == null ? key : to);
+			changed |= to != null && to != key;
+		}
+		if (changed)
+		{
+			placeholders = p;
+			savePlaceholders();
+		}
+	}
+
+	/** The template's order changed: each tab's stored stacks sorted into it, where they are. */
+	void sortStored()
+	{
+		load();
+		if (arrangement.sortStored(rank))
+		{
+			saveArrangement();
+		}
+	}
+
+	/** Every stored stack together at the end of {@code section}, in the template's order. */
+	void moveAllStored(int section)
+	{
+		load();
+		arrangement.moveAllStored(section, rank);
+		saveArrangement();
+	}
+
+	/**
+	 * Stored stacks placed as a template saved them ({@link BankArrangement#placeStoredAs}); with nothing saved,
+	 * forgotten, to be placed afresh in the template's order. Placeholders stay: they are the bank's state, not
+	 * the template's.
+	 */
+	void placeStoredAs(String saved)
+	{
+		load();
+		if (saved == null || saved.isEmpty())
+		{
+			arrangement.clearStored();
+		}
+		else
+		{
+			arrangement.placeStoredAs(BankArrangement.decode(saved));
+		}
 		saveArrangement();
 	}
 

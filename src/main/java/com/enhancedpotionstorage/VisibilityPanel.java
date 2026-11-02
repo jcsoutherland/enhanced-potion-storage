@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -179,7 +180,7 @@ final class VisibilityPanel extends PluginPanel
 	private Switches switches = new Switches(true, true, true, true, false, true);
 
 	VisibilityPanel(IntFunction<AsyncBufferedImage> icons, PotionVisibility visibility, Runnable onOpen,
-		Consumer<Boolean> setCountDoses)
+		Consumer<Boolean> setCountDoses, JComponent templates)
 	{
 		this.icons = icons;
 		this.visibility = visibility;
@@ -230,6 +231,9 @@ final class VisibilityPanel extends PluginPanel
 		depositWarning.setText(html("\"Always deposit to potion storage\" is off, so potions you deposit go into your bank, "
 			+ "not potion storage. Turn it on in the bank's menu."));
 		add(depositWarning);
+
+		// Templates first: which slots the bank shows. Below, potion by potion, where each is shown.
+		add(templates);
 
 		add(tabBar);
 

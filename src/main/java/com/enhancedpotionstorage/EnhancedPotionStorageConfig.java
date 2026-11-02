@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -33,6 +34,15 @@ import net.runelite.client.config.ConfigSection;
 public interface EnhancedPotionStorageConfig extends Config
 {
 	String GROUP = "enhancedpotionstorage";
+	String PLACE_KEY = "bankPlace";
+	String TAG_KEY = "bankPlaceTag";
+
+	@ConfigSection(
+		name = "Dose slots",
+		description = "Where the dose slots go. Which potions and doses show, and in what order, is set in the sidebar panel's templates",
+		position = -1
+	)
+	String DOSE_SLOTS = "doseSlots";
 
 	@ConfigSection(
 		name = "Bank view",
@@ -200,7 +210,7 @@ public interface EnhancedPotionStorageConfig extends Config
 	@ConfigItem(
 		keyName = "showSidebar",
 		name = "Sidebar panel",
-		description = "Add a Potion Storage button to the sidebar, which opens a panel of every potion for choosing where each is shown",
+		description = "Add an Enhanced Potion Storage button to the sidebar, which opens a panel of templates, missing slots and every potion, for choosing what shows where",
 		position = 5
 	)
 	default boolean showSidebar()
@@ -219,22 +229,26 @@ public interface EnhancedPotionStorageConfig extends Config
 		return SidebarCount.POTIONS;
 	}
 
-	// The sidebar panel's choices: the potions hidden in each place (PotionVisibility), as lists of item ids.
-
-	@ConfigItem(keyName = "hiddenInBank", name = "", description = "", hidden = true)
-	default String hiddenInBank()
+	@ConfigItem(
+		keyName = PLACE_KEY,
+		name = "Bank place",
+		description = "Where every dose slot goes, together, when this is changed: the main bank view, a numbered bank tab (it must already have an item in it), or the bank tag named below. A template with a saved layout puts its slots where it saved them",
+		position = 0,
+		section = DOSE_SLOTS
+	)
+	default BankPlace bankPlace()
 	{
-		return "";
+		return BankPlace.MAIN;
 	}
 
-	@ConfigItem(keyName = "hiddenInTags", name = "", description = "", hidden = true)
-	default String hiddenInTags()
-	{
-		return "";
-	}
-
-	@ConfigItem(keyName = "hiddenInSearch", name = "", description = "", hidden = true)
-	default String hiddenInSearch()
+	@ConfigItem(
+		keyName = TAG_KEY,
+		name = "Bank place tag",
+		description = "The bank tag dose slots go to when \"Bank place\" is \"A bank tag\". Needs the Bank Tags plugin",
+		position = 1,
+		section = DOSE_SLOTS
+	)
+	default String bankPlaceTag()
 	{
 		return "";
 	}
