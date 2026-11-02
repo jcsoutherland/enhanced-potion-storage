@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2026, ziggle-dev
+ * Copyright (c) 2026, jcsoutherland
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -47,9 +48,9 @@ import net.runelite.client.ui.FontManager;
 import net.runelite.client.util.AsyncBufferedImage;
 
 /**
- * One potion in the sidebar panel's bank-like grid: drawn as the bank draws an item, with its count in the
- * game's stack colours. Faded, with a crossed-out eye, where the open tab hides it. A click shows or hides it
- * in that tab's place; a right-click offers every place by name.
+ * One dose slot in the sidebar panel's bank-like grid: drawn as the bank draws an item, with how many potions of
+ * its dose there are in the game's stack colours, and its dose in the corner. Faded where the bank hides its
+ * potion, with a crossed-out eye where any place does. A click, left or right, offers every place by name.
  */
 final class PotionSlot extends JComponent
 {
@@ -66,15 +67,9 @@ final class PotionSlot extends JComponent
 	/** What the slot asks of the panel that keeps the settings. */
 	interface Owner
 	{
-		/** The place the open tab is about. */
-		Where tab();
-
 		Set<Where> placesShown(int potionId);
 
 		void set(int potionId, Set<Where> places, boolean show);
-
-		/** Count in doses; otherwise in full potions. */
-		boolean countDoses();
 	}
 
 	final VisibilityPanel.Potion potion;
@@ -118,14 +113,9 @@ final class PotionSlot extends JComponent
 			@Override
 			public void mouseReleased(MouseEvent e)
 			{
-				if (e.isPopupTrigger())
+				if (e.isPopupTrigger() || (SwingUtilities.isLeftMouseButton(e) && contains(e.getPoint())))
 				{
 					showMenu(e);
-				}
-				else if (SwingUtilities.isLeftMouseButton(e) && contains(e.getPoint()))
-				{
-					Where tab = owner.tab();
-					owner.set(potion.id, EnumSet.of(tab), !shown());
 				}
 			}
 		};
@@ -133,15 +123,14 @@ final class PotionSlot extends JComponent
 		addMouseMotionListener(mouse);
 	}
 
-	private boolean shown()
-	{
-		return owner.placesShown(potion.id).contains(owner.tab());
-	}
-
 	private void showMenu(MouseEvent e)
 	{
 		Set<Where> shown = owner.placesShown(potion.id);
 		JPopupMenu menu = new JPopupMenu();
+		JMenuItem title = new JMenuItem(potion.potionName);
+		title.setEnabled(false);
+		menu.add(title);
+		menu.addSeparator();
 		for (Where w : Where.values())
 		{
 			JCheckBoxMenuItem item = new JCheckBoxMenuItem("Show in " + w.phrase, shown.contains(w));
@@ -161,13 +150,15 @@ final class PotionSlot extends JComponent
 	@Override
 	public String getToolTipText(MouseEvent e)
 	{
-		boolean doses = owner.countDoses();
-		String phrase = owner.tab().phrase;
+		Set<Where> hidden = EnumSet.allOf(Where.class);
+		hidden.removeAll(owner.placesShown(potion.id));
+		String where = hidden.isEmpty() ? "Shown everywhere"
+			: hidden.size() == Where.values().length ? "Hidden everywhere"
+			: "Hidden in " + hidden.stream().map(w -> w.phrase).reduce((a, b) -> a + " and " + b).orElse("");
 		return "<html><b>" + potion.name + "</b><br>"
-			+ (doses ? potion.dosesText() : potion.potionsText())
-			+ " <font color='#a5a5a5'>(" + (doses ? potion.potionsText() : potion.dosesText()) + ")</font><br>"
-			+ (shown() ? "Click to hide in " + phrase : "Hidden in " + phrase + ": click to show")
-			+ "<br><font color='#a5a5a5'>Right-click for every place</font></html>";
+			+ String.format("%,d potion%s", potion.quantity, potion.quantity == 1 ? "" : "s")
+			+ " <font color='#a5a5a5'>(" + potion.dose + " dose" + (potion.dose == 1 ? "" : "s") + " each)</font><br>"
+			+ where + "<br><font color='#a5a5a5'>Click to choose where it shows</font></html>";
 	}
 
 	@Override
@@ -182,16 +173,18 @@ final class PotionSlot extends JComponent
 				g.setColor(HOVER);
 				g.fillRoundRect(0, 0, getWidth(), getHeight(), 5, 5);
 			}
-			boolean shown = shown();
+			Set<Where> shown = owner.placesShown(potion.id);
+			boolean inBank = shown.contains(Where.BANK);
 			Composite was = g.getComposite();
-			if (!shown)
+			if (!inBank)
 			{
 				g.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, HIDDEN_ALPHA));
 			}
 			g.drawImage(icon, (getWidth() - icon.getWidth()) / 2, getHeight() - icon.getHeight() - 2, null);
 			paintCount(g);
+			paintDose(g);
 			g.setComposite(was);
-			if (!shown)
+			if (shown.size() < Where.values().length)
 			{
 				int d = 14;
 				int x = getWidth() - d - 1;
@@ -210,7 +203,7 @@ final class PotionSlot extends JComponent
 	/** The count as the game writes a stack's: yellow, white in thousands from 100K, green in millions from 10M. */
 	private void paintCount(Graphics2D g)
 	{
-		int n = owner.countDoses() ? potion.doses : potion.fullPotions();
+		int n = potion.quantity;
 		String text;
 		Color color;
 		if (n >= 10_000_000)
@@ -225,8 +218,7 @@ final class PotionSlot extends JComponent
 		}
 		else
 		{
-			// Doses short of one whole potion: there is some, so never "0".
-			text = n == 0 ? "<1" : String.valueOf(n);
+			text = String.valueOf(n);
 			color = STACK_YELLOW;
 		}
 		g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_OFF);
@@ -235,6 +227,22 @@ final class PotionSlot extends JComponent
 		g.setColor(Color.BLACK);
 		g.drawString(text, 2, y + 1);
 		g.setColor(color);
+		g.drawString(text, 1, y);
+	}
+
+	/** The slot's dose, bottom left, as the bank draws it: green on the store's withdraw dose. */
+	private void paintDose(Graphics2D g)
+	{
+		if (!potion.hasDoseChoice)
+		{
+			return;
+		}
+		String text = String.valueOf(potion.dose);
+		g.setFont(FontManager.getRunescapeSmallFont());
+		int y = getHeight() - 3;
+		g.setColor(Color.BLACK);
+		g.drawString(text, 2, y + 1);
+		g.setColor(potion.active ? DoseLabelOverlay.ACTIVE : Color.WHITE);
 		g.drawString(text, 1, y);
 	}
 }

@@ -33,22 +33,19 @@ import java.awt.Container;
 import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
-import java.awt.FontMetrics;
 import java.awt.Graphics;
 import java.awt.Graphics2D;
 import java.awt.GridLayout;
 import java.awt.Insets;
 import java.awt.LayoutManager;
-import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
 import java.util.EnumSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.function.Consumer;
 import java.util.function.IntFunction;
-import java.util.stream.Collectors;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
@@ -60,12 +57,12 @@ import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.AsyncBufferedImage;
 
 /**
- * The sidebar panel: a tab for each place a stored potion can be shown - the bank, tag tabs, searches - and,
- * under it, every stored potion laid out the way the bank lays out items. Click a potion to hide it in the
- * open tab's place, or to bring it back; right-click it for every place at once. The plugin's own on/off
- * setting for each place still applies on top, and the panel says so when one is off.
+ * The sidebar panel, all in one window: the open template and what to do with it ({@link TemplatePanel}), then
+ * every dose slot in storage laid out the way the bank lays it out, each with how many potions of its dose
+ * there are. Click a slot, left or right, to choose where its potion shows - the bank, tag tabs, searches. The
+ * plugin's own on/off setting for each place still applies on top, and the panel says so when one is off.
  * <p>
- * Swing's thread only. What the game knows - the potions and their doses - comes in through {@link #update}.
+ * Swing's thread only. What the game knows - the slots and their counts - comes in through {@link #update}.
  */
 final class VisibilityPanel extends PluginPanel
 {
@@ -76,57 +73,44 @@ final class VisibilityPanel extends PluginPanel
 	private static final Color BANK_FILL = new Color(62, 53, 41);
 	private static final Color BANK_EDGE = new Color(43, 36, 25);
 	private static final Color BANK_LINE = new Color(90, 77, 58);
-	private static final Color TAB_ON = new Color(58, 58, 58);
-	private static final Color TAB_HOVER = new Color(51, 51, 51);
 	private static final Color SUBTLE = new Color(138, 138, 138);
-	private static final Color FAINT = new Color(111, 111, 111);
 
-	/** One potion kind, as the panel draws it. */
+	/** One dose slot, as the panel draws it. */
 	@EqualsAndHashCode
 	static final class Potion
 	{
+		/** The potion's id ({@link PotionStore.Kind#id()}): what its visibility is kept by. */
 		final int id;
+		/** The slot's dose's item. */
 		final int iconId;
+		/** The dose's name: "Prayer potion(3)". */
 		final String name;
-		final int doses;
-		/** The doses in one whole potion. */
-		final int fullDose;
+		/** The potion's name: "Prayer potion". */
+		final String potionName;
+		final int dose;
+		/** Potions of this dose potion storage could pay. */
+		final int quantity;
+		/** The store's withdraw dose is this one. */
+		final boolean active;
+		final boolean hasDoseChoice;
 		final boolean unfinished;
 
-		Potion(int id, int iconId, String name, int doses, int fullDose, boolean unfinished)
+		Potion(int id, int iconId, String name, String potionName, int dose, int quantity, boolean active,
+			boolean hasDoseChoice, boolean unfinished)
 		{
 			this.id = id;
 			this.iconId = iconId;
 			this.name = name;
-			this.doses = doses;
-			this.fullDose = Math.max(fullDose, 1);
+			this.potionName = potionName;
+			this.dose = dose;
+			this.quantity = quantity;
+			this.active = active;
+			this.hasDoseChoice = hasDoseChoice;
 			this.unfinished = unfinished;
-		}
-
-		int fullPotions()
-		{
-			return doses / fullDose;
-		}
-
-		/** "262 potions + 3 doses", or "262 potions" when there are no doses over. */
-		String potionsText()
-		{
-			int left = doses - fullPotions() * fullDose;
-			return plural(fullPotions(), "potion") + (left > 0 ? " + " + plural(left, "dose") : "");
-		}
-
-		String dosesText()
-		{
-			return plural(doses, "dose");
-		}
-
-		private static String plural(int n, String one)
-		{
-			return String.format("%,d %s%s", n, one, n == 1 ? "" : "s");
 		}
 	}
 
-	/** The plugin's settings that turn a place off whatever the panel says, and how it counts. */
+	/** The plugin's settings that turn a place off whatever the panel says. */
 	@EqualsAndHashCode
 	static final class Switches
 	{
@@ -134,19 +118,15 @@ final class VisibilityPanel extends PluginPanel
 		final boolean inTagTabs;
 		final boolean inSearch;
 		final boolean unfinished;
-		/** Count in doses rather than full potions. */
-		final boolean countDoses;
 		/** The bank's "Always deposit to potion storage" is on. */
 		final boolean depositsToStore;
 
-		Switches(boolean inBank, boolean inTagTabs, boolean inSearch, boolean unfinished, boolean countDoses,
-			boolean depositsToStore)
+		Switches(boolean inBank, boolean inTagTabs, boolean inSearch, boolean unfinished, boolean depositsToStore)
 		{
 			this.inBank = inBank;
 			this.inTagTabs = inTagTabs;
 			this.inSearch = inSearch;
 			this.unfinished = unfinished;
-			this.countDoses = countDoses;
 			this.depositsToStore = depositsToStore;
 		}
 	}
@@ -154,14 +134,10 @@ final class VisibilityPanel extends PluginPanel
 	/** An item's icon, by id. */
 	private final IntFunction<AsyncBufferedImage> icons;
 	private final PotionVisibility visibility;
-	/** Asked when the panel is opened: send the potions again, as they are now. */
+	/** Asked when the panel is opened: send the slots again, as they are now. */
 	private final Runnable onOpen;
-	/** Save the count setting: true for doses. */
-	private final Consumer<Boolean> setCountDoses;
 
 	private final PotionSlot.Owner slotOwner;
-	private final CountSwitch countSwitch = new CountSwitch();
-	private final TabBar tabBar = new TabBar();
 	private final JLabel depositWarning = new JLabel();
 	private final JLabel hint = new JLabel();
 	private final JLabel notice = new JLabel();
@@ -175,27 +151,19 @@ final class VisibilityPanel extends PluginPanel
 	private final JPanel footer = new JPanel(new BorderLayout());
 	private final List<PotionSlot> slots = new ArrayList<>();
 
-	private Where tab = Where.BANK;
 	private List<Potion> potions = new ArrayList<>();
-	private Switches switches = new Switches(true, true, true, true, false, true);
+	private boolean loggedIn;
+	private Switches switches = new Switches(true, true, true, true, true);
 
-	VisibilityPanel(IntFunction<AsyncBufferedImage> icons, PotionVisibility visibility, Runnable onOpen,
-		Consumer<Boolean> setCountDoses, JComponent templates)
+	VisibilityPanel(IntFunction<AsyncBufferedImage> icons, PotionVisibility visibility, Runnable onOpen, JComponent templates)
 	{
 		this.icons = icons;
 		this.visibility = visibility;
 		this.onOpen = onOpen;
-		this.setCountDoses = setCountDoses;
 		// RuneLite's own panel layout keeps room for a hidden note; this gives it none.
 		setLayout(new Column(3));
 		this.slotOwner = new PotionSlot.Owner()
 		{
-			@Override
-			public Where tab()
-			{
-				return tab;
-			}
-
 			@Override
 			public Set<Where> placesShown(int potionId)
 			{
@@ -208,23 +176,13 @@ final class VisibilityPanel extends PluginPanel
 				visibility.set(List.of(potionId), places, show);
 				refresh();
 			}
-
-			@Override
-			public boolean countDoses()
-			{
-				return switches.countDoses;
-			}
 		};
 
-		JPanel header = new JPanel(new BorderLayout());
-		header.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		header.setBorder(new EmptyBorder(0, 0, 2, 0));
 		JLabel title = new JLabel("Enhanced Potion Storage");
 		title.setFont(FontManager.getRunescapeBoldFont());
 		title.setForeground(Color.WHITE);
-		header.add(title, BorderLayout.WEST);
-		header.add(countSwitch, BorderLayout.EAST);
-		add(header);
+		title.setBorder(new EmptyBorder(0, 0, 2, 0));
+		add(title);
 
 		depositWarning.setFont(FontManager.getRunescapeSmallFont());
 		depositWarning.setForeground(ColorScheme.PROGRESS_INPROGRESS_COLOR);
@@ -232,13 +190,18 @@ final class VisibilityPanel extends PluginPanel
 			+ "not potion storage. Turn it on in the bank's menu."));
 		add(depositWarning);
 
-		// Templates first: which slots the bank shows. Below, potion by potion, where each is shown.
+		// Templates first: which slots the bank shows. Below, slot by slot, where each potion is shown.
 		add(templates);
 
-		add(tabBar);
+		JLabel slotsTitle = new JLabel("Dose slots");
+		slotsTitle.setFont(FontManager.getRunescapeBoldFont());
+		slotsTitle.setForeground(Color.WHITE);
+		add(slotsTitle);
 
 		hint.setFont(FontManager.getRunescapeSmallFont());
 		hint.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		hint.setText(html("Every slot in storage, in bank order. Click one to choose where its potion shows: "
+			+ "the bank, tag tabs or searches."));
 		add(hint);
 
 		notice.setFont(FontManager.getRunescapeSmallFont());
@@ -266,8 +229,7 @@ final class VisibilityPanel extends PluginPanel
 		summary.setForeground(SUBTLE);
 		JPanel links = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
 		links.setBackground(ColorScheme.DARK_GRAY_COLOR);
-		links.add(link("Show all", ColorScheme.BRAND_ORANGE, () -> setAll(true)));
-		links.add(link("Hide all", ColorScheme.LIGHT_GRAY_COLOR, () -> setAll(false)));
+		links.add(link("Show all everywhere", ColorScheme.BRAND_ORANGE, this::showAll));
 		footer.add(summary, BorderLayout.WEST);
 		footer.add(links, BorderLayout.EAST);
 		add(footer);
@@ -281,14 +243,15 @@ final class VisibilityPanel extends PluginPanel
 		onOpen.run();
 	}
 
-	/** The potions and the plugin's settings, as they stand. */
-	void update(List<Potion> potions, Switches switches)
+	/** The slots and the plugin's settings, as they stand. */
+	void update(boolean loggedIn, List<Potion> potions, Switches switches)
 	{
-		if (potions.equals(this.potions) && switches.equals(this.switches))
+		if (loggedIn == this.loggedIn && potions.equals(this.potions) && switches.equals(this.switches))
 		{
 			return;
 		}
 		boolean relayout = !potions.equals(this.potions);
+		this.loggedIn = loggedIn;
 		this.potions = potions;
 		this.switches = switches;
 		if (relayout)
@@ -298,34 +261,37 @@ final class VisibilityPanel extends PluginPanel
 		refresh();
 	}
 
-	/** Which potions are shown where changed somewhere else: a profile switch, a reset. */
+	/** Which potions are shown where changed somewhere else: a template opened, a profile switch, a reset. */
 	void settingsChanged()
 	{
 		refresh();
 	}
 
-	private List<Potion> stored()
+	/** Every potion with a slot here, by id. */
+	private Set<Integer> potionIds()
 	{
-		return potions.stream().filter(p -> p.doses > 0).collect(Collectors.toList());
+		Set<Integer> ids = new LinkedHashSet<>();
+		potions.forEach(p -> ids.add(p.id));
+		return ids;
 	}
 
-	private void setAll(boolean show)
+	private void showAll()
 	{
-		List<Integer> ids = stored().stream().map(p -> p.id).collect(Collectors.toList());
+		Set<Integer> ids = potionIds();
 		if (!ids.isEmpty())
 		{
-			visibility.set(ids, EnumSet.of(tab), show);
+			visibility.set(ids, EnumSet.allOf(Where.class), true);
 			refresh();
 		}
 	}
 
-	/** New potions or new doses: lay the slots out again, in potion storage's own order, the ones there are some of. */
+	/** New slots or new counts: lay the slots out again, in bank order. */
 	private void rebuild()
 	{
 		slots.clear();
 		finishedGrid.removeAll();
 		unfinishedGrid.removeAll();
-		for (Potion p : stored())
+		for (Potion p : potions)
 		{
 			PotionSlot slot = new PotionSlot(p, icons.apply(p.iconId), slotOwner);
 			slots.add(slot);
@@ -333,18 +299,15 @@ final class VisibilityPanel extends PluginPanel
 		}
 	}
 
-	/** Everything that follows the open tab and the settings: the words, the counts, the faded slots. */
+	/** Everything that follows the settings: the words, the counts, the faded slots. */
 	private void refresh()
 	{
-		List<Potion> stored = stored();
-		boolean any = !stored.isEmpty();
-		boolean anyFinished = stored.stream().anyMatch(p -> !p.unfinished);
-		boolean anyUnfinished = stored.stream().anyMatch(p -> p.unfinished);
+		boolean any = !potions.isEmpty();
+		boolean anyFinished = potions.stream().anyMatch(p -> !p.unfinished);
+		boolean anyUnfinished = potions.stream().anyMatch(p -> p.unfinished);
 
 		depositWarning.setVisible(!switches.depositsToStore);
-		hint.setText(html("Click a potion to hide it in " + tab.phrase + ". Click it again to bring it back. "
-			+ "Right-click for every place at once."));
-		String off = placeOff();
+		String off = placesOff();
 		notice.setText(off == null ? "" : html(off));
 		notice.setVisible(off != null);
 
@@ -355,29 +318,40 @@ final class VisibilityPanel extends PluginPanel
 		unfinishedNote.setVisible(anyUnfinished && !switches.unfinished);
 		bank.setVisible(any);
 
-		empty.setText(html(potions.isEmpty() ? "Log in to see your potions." : "Potion storage is empty."));
+		empty.setText(html(!loggedIn ? "Log in to see your potions." : "Potion storage has no potions your layout shows."));
 		empty.setVisible(!any);
 
-		long hidden = stored.stream().filter(p -> !visibility.shown(tab, p.id)).count();
-		summary.setText((stored.size() - hidden) + " shown · " + hidden + " hidden");
+		Set<Integer> ids = potionIds();
+		long hidden = ids.stream().filter(id -> visibility.placesShown(id).size() < Where.values().length).count();
+		summary.setText(slots.size() + " slots · " + hidden + " hidden somewhere");
 		footer.setVisible(any);
 
 		revalidate();
 		repaint();
 	}
 
-	/** The plugin setting that keeps every stored potion out of the open tab's place, when it is off. */
-	private String placeOff()
+	/** The plugin settings that keep every stored potion out of a place, when they are off. */
+	private String placesOff()
 	{
-		switch (tab)
+		List<String> off = new ArrayList<>();
+		if (!switches.inBank)
 		{
-			case BANK:
-				return switches.inBank ? null : "\"Show in the bank\" is off in the plugin's settings, so the bank shows no stored potions.";
-			case TAGS:
-				return switches.inTagTabs ? null : "\"Show in tag tabs\" is off in the plugin's settings, so only tag tabs with a layout show stored potions.";
-			default:
-				return switches.inSearch ? null : "\"Show in searches\" is off in the plugin's settings, so searches show no stored potions.";
+			off.add("\"Show in the bank\"");
 		}
+		if (!switches.inTagTabs)
+		{
+			off.add("\"Show in tag tabs\"");
+		}
+		if (!switches.inSearch)
+		{
+			off.add("\"Show in searches\"");
+		}
+		if (off.isEmpty())
+		{
+			return null;
+		}
+		return String.join(" and ", off) + (off.size() == 1 ? " is" : " are")
+			+ " off in the plugin's settings, which goes for every potion whatever its menu here says.";
 	}
 
 	private static JPanel grid()
@@ -490,7 +464,7 @@ final class VisibilityPanel extends PluginPanel
 		}
 	}
 
-	/** The bank's own brown, behind the potions. */
+	/** The bank's own brown, behind the slots. */
 	private static final class BankArea extends JPanel
 	{
 		BankArea()
@@ -536,203 +510,6 @@ final class VisibilityPanel extends PluginPanel
 		{
 			g.setColor(BANK_LINE);
 			g.fillRect(6, getHeight() / 2, getWidth() - 12, 1);
-		}
-	}
-
-	/** The three places, as tabs: a picture, a name, and how many of the stored potions it shows. */
-	private final class TabBar extends JComponent
-	{
-		private static final int H = 40;
-		private static final int GAP = 3;
-		private Where hot;
-
-		TabBar()
-		{
-			setPreferredSize(new Dimension(PANEL_WIDTH - 2 * BORDER_OFFSET, H));
-			setToolTipText("");
-			MouseAdapter mouse = new MouseAdapter()
-			{
-				@Override
-				public void mouseMoved(MouseEvent e)
-				{
-					hot = at(e.getX());
-					repaint();
-				}
-
-				@Override
-				public void mouseExited(MouseEvent e)
-				{
-					hot = null;
-					repaint();
-				}
-
-				@Override
-				public void mouseReleased(MouseEvent e)
-				{
-					Where w = at(e.getX());
-					if (w != null && w != tab && contains(e.getPoint()))
-					{
-						tab = w;
-						refresh();
-					}
-				}
-			};
-			addMouseListener(mouse);
-			addMouseMotionListener(mouse);
-		}
-
-		private int tabWidth()
-		{
-			int n = Where.values().length;
-			return (getWidth() - GAP * (n - 1)) / n;
-		}
-
-		private Where at(int x)
-		{
-			int i = x / (tabWidth() + GAP);
-			return i >= 0 && i < Where.values().length ? Where.values()[i] : null;
-		}
-
-		@Override
-		public String getToolTipText(MouseEvent e)
-		{
-			Where w = at(e.getX());
-			return w == null ? null : "Which stored potions " + w.phrase + " show";
-		}
-
-		@Override
-		protected void paintComponent(Graphics g0)
-		{
-			Graphics2D g = (Graphics2D) g0.create();
-			try
-			{
-				g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-				List<Potion> stored = stored();
-				int tw = tabWidth();
-				for (Where w : Where.values())
-				{
-					int x = w.ordinal() * (tw + GAP);
-					boolean on = w == tab;
-					g.setColor(on ? TAB_ON : w == hot ? TAB_HOVER : ColorScheme.DARKER_GRAY_COLOR);
-					g.fillRoundRect(x, 0, tw, H, 6, 6);
-					if (on)
-					{
-						g.setColor(ColorScheme.BRAND_ORANGE);
-						g.fillRect(x + 4, H - 2, tw - 8, 2);
-					}
-
-					g.setFont(FontManager.getRunescapeBoldFont());
-					FontMetrics fm = g.getFontMetrics();
-					String label = label(w);
-					int left = x + (tw - (Glyphs.SIZE + 4 + fm.stringWidth(label))) / 2;
-					Color fg = on ? Color.WHITE : ColorScheme.LIGHT_GRAY_COLOR;
-					Glyphs.paint(g, w, left + Glyphs.SIZE / 2.0, 13, fg);
-					g.setColor(fg);
-					g.drawString(label, left + Glyphs.SIZE + 4, 13 + fm.getAscent() / 2 - 1);
-
-					long shown = stored.stream().filter(p -> visibility.shown(w, p.id)).count();
-					String sub = shown + " of " + stored.size();
-					g.setFont(FontManager.getRunescapeSmallFont());
-					g.setColor(on ? ColorScheme.BRAND_ORANGE : FAINT);
-					g.drawString(sub, x + (tw - g.getFontMetrics().stringWidth(sub)) / 2, 32);
-				}
-			}
-			finally
-			{
-				g.dispose();
-			}
-		}
-
-		private String label(Where w)
-		{
-			switch (w)
-			{
-				case BANK:
-					return "Bank";
-				case TAGS:
-					return "Tags";
-				default:
-					return "Search";
-			}
-		}
-	}
-
-	/** Potions | Doses: what the slots count. */
-	private final class CountSwitch extends JComponent
-	{
-		private final String[] parts = {"Potions", "Doses"};
-		private int hot = -1;
-
-		CountSwitch()
-		{
-			setPreferredSize(new Dimension(84, 18));
-			setToolTipText("Count in full potions or in doses. Hovering a potion shows the other");
-			MouseAdapter mouse = new MouseAdapter()
-			{
-				@Override
-				public void mouseMoved(MouseEvent e)
-				{
-					hot = at(e.getX());
-					repaint();
-				}
-
-				@Override
-				public void mouseExited(MouseEvent e)
-				{
-					hot = -1;
-					repaint();
-				}
-
-				@Override
-				public void mouseReleased(MouseEvent e)
-				{
-					boolean doses = at(e.getX()) == 1;
-					if (contains(e.getPoint()) && doses != switches.countDoses)
-					{
-						setCountDoses.accept(doses);
-					}
-				}
-			};
-			addMouseListener(mouse);
-			addMouseMotionListener(mouse);
-		}
-
-		private int at(int x)
-		{
-			return x < getWidth() / 2 ? 0 : 1;
-		}
-
-		@Override
-		protected void paintComponent(Graphics g0)
-		{
-			Graphics2D g = (Graphics2D) g0.create();
-			try
-			{
-				g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-				int w = getWidth();
-				int h = getHeight();
-				g.setColor(ColorScheme.DARKER_GRAY_COLOR);
-				g.fillRoundRect(0, 0, w, h, 6, 6);
-				g.setFont(FontManager.getRunescapeSmallFont());
-				FontMetrics fm = g.getFontMetrics();
-				for (int i = 0; i < parts.length; i++)
-				{
-					boolean on = (i == 1) == switches.countDoses;
-					int x0 = i * w / 2;
-					int x1 = (i + 1) * w / 2;
-					if (on || i == hot)
-					{
-						g.setColor(on ? TAB_ON : TAB_HOVER);
-						g.fillRoundRect(x0 + 2, 2, x1 - x0 - 4, h - 4, 4, 4);
-					}
-					g.setColor(on ? Color.WHITE : SUBTLE);
-					g.drawString(parts[i], x0 + (x1 - x0 - fm.stringWidth(parts[i])) / 2, (h + fm.getAscent()) / 2 - 2);
-				}
-			}
-			finally
-			{
-				g.dispose();
-			}
 		}
 	}
 }

@@ -40,7 +40,8 @@ tasks.register('run', JavaExec) {
 	mainClass = pluginMainClass
 
 	jvmArgs "-ea"
-	args "--developer-mode", "--debug"
+	// A profile of its own: none of the main profile's plugin hub plugins or settings, and nothing done here touches them.
+	args "--developer-mode", "--debug", "--profile=enhanced-potion-storage-dev"
 }
 
 // A runnable jar of RuneLite with this plugin loaded, for trying it out: java -ea -jar build/libs/*-all.jar

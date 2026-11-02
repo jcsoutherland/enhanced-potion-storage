@@ -289,7 +289,6 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		visibility = new PotionVisibility(this::readHidden, this::writeHidden);
 		templatePanel = new TemplatePanel(new PanelActions());
 		sidebar = new VisibilityPanel(itemManager::getImage, visibility, () -> clientThread.invokeLater(this::sendPotions),
-			doses -> configManager.setConfiguration(EnhancedPotionStorageConfig.GROUP, "sidebarCount", doses ? SidebarCount.DOSES : SidebarCount.POTIONS),
 			templatePanel);
 		doseLabels = new DoseLabelOverlay(() -> frame);
 		overlayManager.add(doseLabels);
@@ -1712,34 +1711,40 @@ public class EnhancedPotionStoragePlugin extends Plugin
 		return sidebar != null && sidebar.isShowing();
 	}
 
-	/** Every potion the store keeps, with its doses as last read, to the sidebar panel. Client thread. */
+	/**
+	 * Every dose slot the store can pay any of, in the plan's order, with the potions of its dose it holds, and
+	 * the template part's state, to the sidebar panel. Client thread.
+	 */
 	private void sendPotions()
 	{
 		List<VisibilityPanel.Potion> potions = new ArrayList<>();
-		if (client.getGameState() == GameState.LOGGED_IN)
+		boolean loggedIn = client.getGameState() == GameState.LOGGED_IN;
+		if (loggedIn)
 		{
 			if (readStore() && bankShown())
 			{
 				relayout();
 			}
-			for (PotionStore.Kind k : store.kinds())
+			for (SlotPlan.Slot s : store.plan().slots())
 			{
-				if (k.id() > 0)
+				PotionStore.Kind k = store.kindOf(s.itemId);
+				int quantity = k == null ? 0 : store.doses(k) / s.dose;
+				if (quantity > 0)
 				{
-					String name = client.getItemDefinition(k.iconId()).getName().replaceAll(DOSE_SUFFIX, "");
-					potions.add(new VisibilityPanel.Potion(k.id(), k.iconId(), name, store.doses(k), k.fullDose, k.unfinished));
+					String name = client.getItemDefinition(s.itemId).getName();
+					potions.add(new VisibilityPanel.Potion(k.id(), s.itemId, name, name.replaceAll(DOSE_SUFFIX, ""), s.dose,
+						quantity, store.isActive(k, s.dose), !k.doses.isEmpty(), k.unfinished));
 				}
 			}
 		}
-		boolean depositsToStore = client.getGameState() != GameState.LOGGED_IN
-			|| client.getVarbitValue(VarbitID.BANK_DEPOSITPOTION) != 0;
+		boolean depositsToStore = !loggedIn || client.getVarbitValue(VarbitID.BANK_DEPOSITPOTION) != 0;
 		VisibilityPanel.Switches switches = new VisibilityPanel.Switches(config.inBank(), config.inTagTabs(),
-			config.inSearch(), config.showUnfinished(), config.sidebarCount() == SidebarCount.DOSES, depositsToStore);
+			config.inSearch(), config.showUnfinished(), depositsToStore);
 		TemplatePanel.State state = panelState();
 		SwingUtilities.invokeLater(() ->
 		{
 			templatePanel.update(state);
-			sidebar.update(potions, switches);
+			sidebar.update(loggedIn, potions, switches);
 		});
 	}
 

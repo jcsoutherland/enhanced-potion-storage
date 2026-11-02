@@ -37,7 +37,7 @@ final class AccountSettings
 	/** Every setting kept per account: all of them but the ones the plugin keeps itself. */
 	static final List<String> KEYS = List.of("inBank", "showUnfinished", "inSearch", "hideStoreButton", "placeholders",
 		"inTagTabs", "addToLayouts", "dragFromStore", "combineWithBank", "combinedWithdraw", "instantCounts",
-		"warnDeposits", "showSidebar", "sidebarCount", EnhancedPotionStorageConfig.PLACE_KEY,
+		"warnDeposits", "showSidebar", EnhancedPotionStorageConfig.PLACE_KEY,
 		EnhancedPotionStorageConfig.TAG_KEY);
 
 	private static final String PREFIX = "account.";

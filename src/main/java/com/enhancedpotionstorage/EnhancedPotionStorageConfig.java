@@ -219,17 +219,6 @@ public interface EnhancedPotionStorageConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "sidebarCount",
-		name = "Sidebar counts",
-		description = "Count each potion in the sidebar panel in full potions or in doses. Hovering a potion shows the other",
-		position = 6
-	)
-	default SidebarCount sidebarCount()
-	{
-		return SidebarCount.POTIONS;
-	}
-
-	@ConfigItem(
 		keyName = PLACE_KEY,
 		name = "Bank place",
 		description = "Where every dose slot goes, together, when this is changed: the main bank view, a numbered bank tab (it must already have an item in it), or the bank tag named below. A template with a saved layout puts its slots where it saved them",
